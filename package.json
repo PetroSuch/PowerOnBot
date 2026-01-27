@@ -1,0 +1,25 @@
+{
+  "name": "chatbot-power",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:watch": "tsc -w -p tsconfig.json",
+    "prestart": "npm run build",
+    "start": "nodemon --config nodemon.json dist/index.js",
+    "dev": "concurrently \"npm run build:watch\" \"npm start\""
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "@types/node": "^25.0.10",
+    "concurrently": "^9.2.1",
+    "nodemon": "^3.1.11",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "cheerio": "^1.2.0",
+    "telegraf": "^4.16.3"
+  }
+}
