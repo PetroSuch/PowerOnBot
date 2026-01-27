@@ -280,6 +280,9 @@ async function checkOneChat(chatId: string, user: UserState, forceCheck: boolean
     user.lastLoeError = 'Не задано групи. Використайте /groups та введіть, наприклад: 1.1, 3.2';
     user.lastLoeCheckedAt = new Date().toISOString();
     await writeStateToDisk(state);
+    if (forceCheck) {
+      await bot.telegram.sendMessage(chatId, user.lastLoeError);
+    }
     return;
   }
 
@@ -303,6 +306,22 @@ async function checkOneChat(chatId: string, user: UserState, forceCheck: boolean
     if (!prev) {
       user.lastLoeWatchedText = watchedText;
       await writeStateToDisk(state);
+      if (forceCheck) {
+        user.lastLoeNotifiedAt = new Date().toISOString();
+        await writeStateToDisk(state);
+        await bot.telegram.sendMessage(
+          chatId,
+          [
+            '🔥 Оновлення перевірено!',
+            ' ',
+            watchedText || '(Не вдалося прочитати текст)',
+            '',
+            imageUrl ? `\nГрафік відключень: ${imageUrl}` : '',
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        );
+      }
       return;
     }
     
@@ -331,6 +350,9 @@ async function checkOneChat(chatId: string, user: UserState, forceCheck: boolean
     user.lastLoeCheckedAt = new Date().toISOString();
     user.lastLoeError = err?.message ? String(err.message) : 'Невідома помилка під час перевірки графіка';
     await writeStateToDisk(state);
+    if (forceCheck) {
+      await bot.telegram.sendMessage(chatId, `❌ Помилка: ${user.lastLoeError}`);
+    }
   }
 }
 
@@ -339,6 +361,15 @@ async function checkAllWatchingChats(): Promise<void> {
   for (const [chatId, user] of entries) {
     await checkOneChat(chatId, user);
   }
+}
+
+async function checkLikeCheckCommand(ctx: any): Promise<void> {
+  const chatId = String(ctx.chat.id);
+  await ctx.reply('Перевіряю…');
+  await runStateOp(async () => {
+    const user = await ensureUser(chatId);
+    await checkOneChat(chatId, user, true);
+  });
 }
 
 async function watchLikeWatchCommand(ctx: any): Promise<void> {
@@ -402,6 +433,7 @@ bot.start(async (ctx) => {
   });
   await ctx.reply('Привіт!\nЯ чат-бот який вміє відстежувати графік погодинних відключень для вибраних груп та сповіщати, коли він зміниться.\nДодай групи відключень електроенергії та я буду сповіщати тебе, коли вони зміняться.');
   await promptForNextStep(ctx, 'groups');
+  await checkLikeCheckCommand(ctx);
 });
 
 bot.command('groups_list', async (ctx) => {
@@ -450,6 +482,7 @@ async function addGroupCommand(ctx: any): Promise<void> {
 
   const groups = state.users[chatId]?.groups ?? [];
   await ctx.reply(`Додано ✅\nВи відстежуєте такі групи відключень електроенергії: ${groups.join(', ')}`);
+  await checkLikeCheckCommand(ctx);
 }
 
 bot.command('add_group', addGroupCommand);
@@ -491,6 +524,7 @@ async function removeGroupCommand(ctx: any): Promise<void> {
 
   const groups = state.users[chatId]?.groups ?? [];
   await ctx.reply(groups.length ? `Видалено ✅\nТепер групи: ${groups.join(', ')}` : 'Видалено ✅\nГрупи порожні. Використайте /groups');
+  await checkLikeCheckCommand(ctx);
 }
 
 bot.command('remove_group', removeGroupCommand);
@@ -498,12 +532,7 @@ bot.command('remove_group', removeGroupCommand);
 bot.command('groups_remove', removeGroupCommand);
 
 bot.command('check', async (ctx) => {
-  const chatId = String(ctx.chat.id);
-  await ctx.reply('Перевіряю…');
-  await runStateOp(async () => {
-    const user = await ensureUser(chatId);
-    await checkOneChat(chatId, user, true);
-  });
+  await checkLikeCheckCommand(ctx);
 });
 
 bot.on('text', async (ctx) => {
@@ -574,6 +603,7 @@ bot.on('text', async (ctx) => {
 
       const groups = state.users[chatId]?.groups ?? [];
       await ctx.reply(`Додано ✅\nТепер групи: ${groups.join(', ')}`);
+      await checkLikeCheckCommand(ctx);
       return;
     }
 
@@ -597,6 +627,7 @@ bot.on('text', async (ctx) => {
 
       const groups = state.users[chatId]?.groups ?? [];
       await ctx.reply(groups.length ? `Видалено ✅\nТепер групи: ${groups.join(', ')}` : 'Видалено ✅\nГрупи порожні. Використайте /groups');
+      await checkLikeCheckCommand(ctx);
       return;
     }
   }
@@ -635,7 +666,32 @@ async function main() {
     }).catch(() => undefined);
   }, CHECK_EVERY_MS);
 
-  bot.launch();
+  // If this bot was previously configured with a webhook, long-polling will fail.
+  // Clearing webhook here makes long-polling startup more reliable across deploys.
+  try {
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true } as any);
+  } catch {
+    // ignore
+  }
+
+  try {
+    await bot.launch({ dropPendingUpdates: true });
+  } catch (err: any) {
+    const code = err?.response?.error_code;
+    const desc = err?.response?.description ?? err?.description ?? err?.message;
+    if (code === 409) {
+      // eslint-disable-next-line no-console
+      console.error(
+        [
+          'Telegram 409 conflict while starting long polling.',
+          'This means another bot instance is already calling getUpdates for the same BOT_TOKEN.',
+          'Stop the other instance (local dev / another Render service / another process) or switch to webhooks.',
+          `Details: ${String(desc)}`,
+        ].join(' '),
+      );
+    }
+    throw err;
+  }
   
   // eslint-disable-next-line no-console
   console.log(`Bot is running.. Scheduler interval: ${CHECK_EVERY_MS}ms`);

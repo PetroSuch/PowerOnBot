@@ -233,6 +233,9 @@ function checkOneChat(chatId_1, user_1) {
             user.lastLoeError = 'Не задано групи. Використайте /groups та введіть, наприклад: 1.1, 3.2';
             user.lastLoeCheckedAt = new Date().toISOString();
             yield writeStateToDisk(state);
+            if (forceCheck) {
+                yield bot.telegram.sendMessage(chatId, user.lastLoeError);
+            }
             return;
         }
         try {
@@ -252,6 +255,19 @@ function checkOneChat(chatId_1, user_1) {
             if (!prev) {
                 user.lastLoeWatchedText = watchedText;
                 yield writeStateToDisk(state);
+                if (forceCheck) {
+                    user.lastLoeNotifiedAt = new Date().toISOString();
+                    yield writeStateToDisk(state);
+                    yield bot.telegram.sendMessage(chatId, [
+                        '🔥 Оновлення перевірено!',
+                        ' ',
+                        watchedText || '(Не вдалося прочитати текст)',
+                        '',
+                        imageUrl ? `\nГрафік відключень: ${imageUrl}` : '',
+                    ]
+                        .filter(Boolean)
+                        .join('\n'));
+                }
                 return;
             }
             if (prev !== watchedGroupsText || forceCheck) {
@@ -275,6 +291,9 @@ function checkOneChat(chatId_1, user_1) {
             user.lastLoeCheckedAt = new Date().toISOString();
             user.lastLoeError = (err === null || err === void 0 ? void 0 : err.message) ? String(err.message) : 'Невідома помилка під час перевірки графіка';
             yield writeStateToDisk(state);
+            if (forceCheck) {
+                yield bot.telegram.sendMessage(chatId, `❌ Помилка: ${user.lastLoeError}`);
+            }
         }
     });
 }
@@ -284,6 +303,16 @@ function checkAllWatchingChats() {
         for (const [chatId, user] of entries) {
             yield checkOneChat(chatId, user);
         }
+    });
+}
+function checkLikeCheckCommand(ctx) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const chatId = String(ctx.chat.id);
+        yield ctx.reply('Перевіряю…');
+        yield runStateOp(() => __awaiter(this, void 0, void 0, function* () {
+            const user = yield ensureUser(chatId);
+            yield checkOneChat(chatId, user, true);
+        }));
     });
 }
 function watchLikeWatchCommand(ctx) {
@@ -338,6 +367,7 @@ bot.start((ctx) => __awaiter(void 0, void 0, void 0, function* () {
     }));
     yield ctx.reply('Привіт!\nЯ чат-бот який вміє відстежувати графік погодинних відключень для вибраних груп та сповіщати, коли він зміниться.\nДодай групи відключень електроенергії та я буду сповіщати тебе, коли вони зміняться.');
     yield promptForNextStep(ctx, 'groups');
+    yield checkLikeCheckCommand(ctx);
 }));
 bot.command('groups_list', (ctx) => __awaiter(void 0, void 0, void 0, function* () {
     var _a;
@@ -383,6 +413,7 @@ function addGroupCommand(ctx) {
         }));
         const groups = (_d = (_c = state.users[chatId]) === null || _c === void 0 ? void 0 : _c.groups) !== null && _d !== void 0 ? _d : [];
         yield ctx.reply(`Додано ✅\nВи відстежуєте такі групи відключень електроенергії: ${groups.join(', ')}`);
+        yield checkLikeCheckCommand(ctx);
     });
 }
 bot.command('add_group', addGroupCommand);
@@ -421,18 +452,14 @@ function removeGroupCommand(ctx) {
         }));
         const groups = (_d = (_c = state.users[chatId]) === null || _c === void 0 ? void 0 : _c.groups) !== null && _d !== void 0 ? _d : [];
         yield ctx.reply(groups.length ? `Видалено ✅\nТепер групи: ${groups.join(', ')}` : 'Видалено ✅\nГрупи порожні. Використайте /groups');
+        yield checkLikeCheckCommand(ctx);
     });
 }
 bot.command('remove_group', removeGroupCommand);
 // Backward-compatible alias
 bot.command('groups_remove', removeGroupCommand);
 bot.command('check', (ctx) => __awaiter(void 0, void 0, void 0, function* () {
-    const chatId = String(ctx.chat.id);
-    yield ctx.reply('Перевіряю…');
-    yield runStateOp(() => __awaiter(void 0, void 0, void 0, function* () {
-        const user = yield ensureUser(chatId);
-        yield checkOneChat(chatId, user, true);
-    }));
+    yield checkLikeCheckCommand(ctx);
 }));
 bot.on('text', (ctx) => __awaiter(void 0, void 0, void 0, function* () {
     var _a, _b, _c, _d, _e;
@@ -494,6 +521,7 @@ bot.on('text', (ctx) => __awaiter(void 0, void 0, void 0, function* () {
             }));
             const groups = (_c = (_b = state.users[chatId]) === null || _b === void 0 ? void 0 : _b.groups) !== null && _c !== void 0 ? _c : [];
             yield ctx.reply(`Додано ✅\nТепер групи: ${groups.join(', ')}`);
+            yield checkLikeCheckCommand(ctx);
             return;
         }
         if (pending === 'groups_remove') {
@@ -515,12 +543,14 @@ bot.on('text', (ctx) => __awaiter(void 0, void 0, void 0, function* () {
             }));
             const groups = (_e = (_d = state.users[chatId]) === null || _d === void 0 ? void 0 : _d.groups) !== null && _e !== void 0 ? _e : [];
             yield ctx.reply(groups.length ? `Видалено ✅\nТепер групи: ${groups.join(', ')}` : 'Видалено ✅\nГрупи порожні. Використайте /groups');
+            yield checkLikeCheckCommand(ctx);
             return;
         }
     }
 }));
 function main() {
     return __awaiter(this, void 0, void 0, function* () {
+        var _a, _b, _c, _d;
         state = yield readStateFromDisk();
         // Ensure shape
         if (!state.users)
@@ -535,7 +565,7 @@ function main() {
                 { command: 'check', description: 'Перевірити зараз' },
             ]);
         }
-        catch (_a) {
+        catch (_e) {
             // ignore: bot can still run even if Telegram command registration fails
         }
         // Initial check shortly after boot, then every CHECK_EVERY_MS
@@ -550,7 +580,31 @@ function main() {
                 yield checkAllWatchingChats();
             })).catch(() => undefined);
         }, CHECK_EVERY_MS);
-        bot.launch();
+        // If this bot was previously configured with a webhook, long-polling will fail.
+        // Clearing webhook here makes long-polling startup more reliable across deploys.
+        try {
+            yield bot.telegram.deleteWebhook({ drop_pending_updates: true });
+        }
+        catch (_f) {
+            // ignore
+        }
+        try {
+            yield bot.launch({ dropPendingUpdates: true });
+        }
+        catch (err) {
+            const code = (_a = err === null || err === void 0 ? void 0 : err.response) === null || _a === void 0 ? void 0 : _a.error_code;
+            const desc = (_d = (_c = (_b = err === null || err === void 0 ? void 0 : err.response) === null || _b === void 0 ? void 0 : _b.description) !== null && _c !== void 0 ? _c : err === null || err === void 0 ? void 0 : err.description) !== null && _d !== void 0 ? _d : err === null || err === void 0 ? void 0 : err.message;
+            if (code === 409) {
+                // eslint-disable-next-line no-console
+                console.error([
+                    'Telegram 409 conflict while starting long polling.',
+                    'This means another bot instance is already calling getUpdates for the same BOT_TOKEN.',
+                    'Stop the other instance (local dev / another Render service / another process) or switch to webhooks.',
+                    `Details: ${String(desc)}`,
+                ].join(' '));
+            }
+            throw err;
+        }
         // eslint-disable-next-line no-console
         console.log(`Bot is running.. Scheduler interval: ${CHECK_EVERY_MS}ms`);
     });
