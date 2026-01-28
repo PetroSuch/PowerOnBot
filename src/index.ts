@@ -188,7 +188,7 @@ async function fetchLoePhotoGraficFirstMenuItem(): Promise<{
 
   const data = (await res.json()) as LoeMenusResponse;
   const menu = data['hydra:member']?.[0];
-  const item = menu?.menuItems?.[0];
+  const item = menu?.menuItems?.find((item: LoeMenuItem) => item.name === "Today");
   if (!menu || !item) {
     throw new Error('LOE API response did not contain hydra:member[0].menuItems[0]');
   }
