@@ -55,6 +55,13 @@ type UserState = {
   lastLoeNotifiedAt?: IsoDateString;
   lastLoeWatchedText?: string;
   lastLoeError?: string;
+
+  // LOE "Tomorrow" tracking snapshot (for watched groups)
+  lastLoeTomorrowCheckedAt?: IsoDateString;
+  lastLoeTomorrowNotifiedAt?: IsoDateString;
+  lastLoeTomorrowWatchedText?: string;
+  lastLoeTomorrowStatus?: 'missing' | 'present';
+  lastLoeTomorrowError?: string;
 };
 
 type BotState = {
@@ -62,7 +69,7 @@ type BotState = {
 };
 
 const STATE_FILE_PATH = path.join(process.cwd(), 'label-state.json');
-const DEFAULT_CHECK_EVERY_MS = 15 * 60 * 1000; // 15 minutes
+const DEFAULT_CHECK_EVERY_MS = 30 * 60 * 1000; // 15 minutes
 const CHECK_EVERY_MS = Number(process.env.CHECK_EVERY_MS ?? DEFAULT_CHECK_EVERY_MS);
 console.log('CHECK_EVERY_MS', CHECK_EVERY_MS);
 if (!Number.isFinite(CHECK_EVERY_MS) || CHECK_EVERY_MS <= 0) {
@@ -162,12 +169,11 @@ function parseGroupSchedulesFromText(text: string): Record<string, string> {
   return map;
 }
 
-async function fetchLoePhotoGraficFirstMenuItem(): Promise<{
+async function fetchLoePhotoGraficMenuItems(): Promise<{
   menuName: string;
-  item: LoeMenuItem;
-  itemText: string;
-  imageUrl: string;
   sourceUrl: string;
+  today?: { item: LoeMenuItem; itemText: string; imageUrl: string };
+  tomorrow?: { item: LoeMenuItem; itemText: string; imageUrl: string };
 }> {
   const defaultType = 'photo-grafic';
   const type = String(process.env.LOE_MENU_TYPE ?? defaultType);
@@ -188,14 +194,30 @@ async function fetchLoePhotoGraficFirstMenuItem(): Promise<{
 
   const data = (await res.json()) as LoeMenusResponse;
   const menu = data['hydra:member']?.[0];
-  const item = menu?.menuItems?.find((item: LoeMenuItem) => item.name === "Today");
-  if (!menu || !item) {
-    throw new Error('LOE API response did not contain hydra:member[0].menuItems[0]');
+  if (!menu || !Array.isArray(menu.menuItems)) {
+    throw new Error('LOE API response did not contain hydra:member[0].menuItems');
   }
 
-  const itemText = textFromRawHtml(item.rawMobileHtml || item.rawHtml);
-  const imageUrl = absoluteLoeMediaUrl(item.imageUrl || item.slug);
-  return { menuName: menu.name, item, itemText, imageUrl, sourceUrl };
+  const todayItem = menu.menuItems.find((item: LoeMenuItem) => item.name === 'Today');
+  const tomorrowItem = menu.menuItems.find((item: LoeMenuItem) => item.name === 'Tomorrow');
+ 
+  const today = todayItem
+    ? {
+        item: todayItem,
+        itemText: textFromRawHtml(todayItem.rawMobileHtml || todayItem.rawHtml),
+        imageUrl: absoluteLoeMediaUrl(todayItem.imageUrl || todayItem.slug),
+      }
+    : undefined;
+
+  const tomorrow = tomorrowItem
+    ? {
+        item: tomorrowItem,
+        itemText: textFromRawHtml(tomorrowItem.rawMobileHtml || tomorrowItem.rawHtml),
+        imageUrl: absoluteLoeMediaUrl(tomorrowItem.imageUrl || tomorrowItem.slug),
+      }
+    : undefined;
+
+  return { menuName: menu.name, sourceUrl, today, tomorrow };
 }
 
 async function readStateFromDisk(): Promise<BotState> {
@@ -229,7 +251,7 @@ function normalizeStateShape(input: any): BotState {
       u.pendingStep === 'groups' || u.pendingStep === 'groups_add' || u.pendingStep === 'groups_remove'
         ? (u.pendingStep as UserState['pendingStep'])
         : undefined;
-
+    
     users[chatId] = {
       groups: Array.isArray(u.groups) ? u.groups.filter((x: any) => typeof x === 'string') : undefined,
       pendingStep: pending,
@@ -238,6 +260,17 @@ function normalizeStateShape(input: any): BotState {
       lastLoeNotifiedAt: typeof u.lastLoeNotifiedAt === 'string' ? u.lastLoeNotifiedAt : undefined,
       lastLoeWatchedText: typeof u.lastLoeWatchedText === 'string' ? u.lastLoeWatchedText : undefined,
       lastLoeError: typeof u.lastLoeError === 'string' ? u.lastLoeError : undefined,
+
+      lastLoeTomorrowCheckedAt: typeof u.lastLoeTomorrowCheckedAt === 'string' ? u.lastLoeTomorrowCheckedAt : undefined,
+      lastLoeTomorrowNotifiedAt:
+        typeof u.lastLoeTomorrowNotifiedAt === 'string' ? u.lastLoeTomorrowNotifiedAt : undefined,
+      lastLoeTomorrowWatchedText:
+        typeof u.lastLoeTomorrowWatchedText === 'string' ? u.lastLoeTomorrowWatchedText : undefined,
+      lastLoeTomorrowStatus:
+        u.lastLoeTomorrowStatus === 'missing' || u.lastLoeTomorrowStatus === 'present'
+          ? (u.lastLoeTomorrowStatus as UserState['lastLoeTomorrowStatus'])
+          : undefined,
+      lastLoeTomorrowError: typeof u.lastLoeTomorrowError === 'string' ? u.lastLoeTomorrowError : undefined,
     };
   }
 
@@ -288,11 +321,16 @@ async function checkOneChat(chatId: string, user: UserState, forceCheck: boolean
 
 
   try {
-    const { itemText, imageUrl } = await fetchLoePhotoGraficFirstMenuItem();
-    const groupMap = parseGroupSchedulesFromText(itemText);
+    const { today, tomorrow } = await fetchLoePhotoGraficMenuItems();
+    if (!today) {
+      throw new Error('LOE API не повернув елемент меню з name="Today"');
+    }
+
+    // ---- TODAY ----
+    const groupMap = parseGroupSchedulesFromText(today.itemText);
     const selectedLines = user.groups.map((g) => groupMap[g] ?? `Група ${g}. (Не знайдено в оновленні)`);
     // Keep the top 2 lines if present (usually "Графік ...", "Інформація станом ...")
-    const headerLines = normalizeMultilineText(itemText)
+    const headerLines = normalizeMultilineText(today.itemText)
       .split('\n')
       .slice(0, 2)
       .filter((l) => l.length > 0);
@@ -302,8 +340,9 @@ async function checkOneChat(chatId: string, user: UserState, forceCheck: boolean
     const prev = user.lastLoeWatchedText ? extractGroupLinesOnly(user.lastLoeWatchedText) : undefined;
     user.lastLoeCheckedAt = new Date().toISOString();
     user.lastLoeError = undefined;
-
+    
     if (!prev) {
+      // Baseline snapshot for today (do not spam on first seen unless forceCheck)
       user.lastLoeWatchedText = watchedText;
       await writeStateToDisk(state);
       if (forceCheck) {
@@ -316,16 +355,13 @@ async function checkOneChat(chatId: string, user: UserState, forceCheck: boolean
             ' ',
             watchedText || '(Не вдалося прочитати текст)',
             '',
-            imageUrl ? `\nГрафік відключень: ${imageUrl}` : '',
+            today.imageUrl ? `\nГрафік відключень: ${today.imageUrl}` : '',
           ]
             .filter(Boolean)
             .join('\n'),
         );
       }
-      return;
-    }
-    
-    if (prev !== watchedGroupsText || forceCheck) {
+    } else if (prev !== watchedGroupsText || forceCheck) {
       user.lastLoeWatchedText = watchedText;
       user.lastLoeNotifiedAt = new Date().toISOString();
       await writeStateToDisk(state);
@@ -333,11 +369,86 @@ async function checkOneChat(chatId: string, user: UserState, forceCheck: boolean
       await bot.telegram.sendMessage(
         chatId,
         [
-          forceCheck ? '🔥 Оновлення перевірено!' : '🔥 Графік відключень змінився!',
+          forceCheck ? '🔥 Оновлення перевірено!' : '🔥 Графік відключень на сьогодні змінився!',
           ' ',
           watchedText || '(Не вдалося прочитати текст)',
           '',
-          imageUrl ? `\nГрафік відключень: ${imageUrl}` : '',
+          today.imageUrl ? `\nГрафік відключень на сьогодні: ${today.imageUrl}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      );
+    }
+
+    // ---- TOMORROW ----
+    user.lastLoeTomorrowCheckedAt = new Date().toISOString();
+    user.lastLoeTomorrowError = undefined;
+
+    if (!tomorrow) {
+      // Tomorrow is not published yet
+      user.lastLoeTomorrowStatus = 'missing';
+      await writeStateToDisk(state);
+      return;
+    }
+
+    const tomorrowGroupMap = parseGroupSchedulesFromText(tomorrow.itemText);
+    const tomorrowSelectedLines = user.groups.map(
+      (g) => tomorrowGroupMap[g] ?? `Група ${g}. (Не знайдено в графіку на завтра)`,
+    );
+    const hasAnyTomorrowDataForSelectedGroups = user.groups.some((g) => Boolean(tomorrowGroupMap[g]));
+    const tomorrowHeaderLines = normalizeMultilineText(tomorrow.itemText)
+      .split('\n')
+      .slice(0, 2)
+      .filter((l) => l.length > 0);
+    const tomorrowWatchedText = [...tomorrowHeaderLines, '', ...tomorrowSelectedLines].join('\n').trim();
+    const tomorrowWatchedGroupsText = tomorrowSelectedLines.join('\n').trim();
+    const tomorrowPrevGroupsOnly = user.lastLoeTomorrowWatchedText
+      ? extractGroupLinesOnly(user.lastLoeTomorrowWatchedText)
+      : undefined;
+
+    const appeared = user.lastLoeTomorrowStatus !== 'present';
+    user.lastLoeTomorrowStatus = 'present';
+
+    // If LOE published "Tomorrow" but there is no data for the user's selected groups,
+    // do not send an "empty" notification like "(Не знайдено в графіку на завтра)".
+    // Still store a snapshot so we can notify later if data for the groups appears.
+    if (!hasAnyTomorrowDataForSelectedGroups) {
+      user.lastLoeTomorrowWatchedText = tomorrowWatchedText;
+      await writeStateToDisk(state);
+      return;
+    }
+
+    if (appeared) {
+      user.lastLoeTomorrowWatchedText = tomorrowWatchedText;
+      user.lastLoeTomorrowNotifiedAt = new Date().toISOString();
+      await writeStateToDisk(state);
+      await bot.telegram.sendMessage(
+        chatId,
+        [
+          '🗓️ Зʼявився графік відключень на завтра!',
+          ' ',
+          tomorrowWatchedText || '(Не вдалося прочитати текст)',
+          '',
+          tomorrow.imageUrl ? `\nГрафік (завтра): ${tomorrow.imageUrl}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      );
+      return;
+    }
+
+    if (tomorrowPrevGroupsOnly !== tomorrowWatchedGroupsText) {
+      user.lastLoeTomorrowWatchedText = tomorrowWatchedText;
+      user.lastLoeTomorrowNotifiedAt = new Date().toISOString();
+      await writeStateToDisk(state);
+      await bot.telegram.sendMessage(
+        chatId,
+        [
+          '🗓️ Графік відключень на завтра змінився!',
+          ' ',
+          tomorrowWatchedText || '(Не вдалося прочитати текст)',
+          '',
+          tomorrow.imageUrl ? `\nГрафік (завтра): ${tomorrow.imageUrl}` : '',
         ]
           .filter(Boolean)
           .join('\n'),
@@ -660,7 +771,7 @@ async function main() {
   }, 2000);
 
   setInterval(() => {
-    console.log('Checking all watching chats...');
+    console.log('Checking all watching chats...', new Date().toISOString());
     runStateOp(async () => {
       await checkAllWatchingChats();
     }).catch(() => undefined);
