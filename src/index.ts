@@ -69,11 +69,36 @@ type BotState = {
 };
 
 const STATE_FILE_PATH = path.join(process.cwd(), 'label-state.json');
-const DEFAULT_CHECK_EVERY_MS = 30 * 60 * 1000; // 15 minutes
-const CHECK_EVERY_MS = Number(process.env.CHECK_EVERY_MS ?? DEFAULT_CHECK_EVERY_MS);
-console.log('CHECK_EVERY_MS', CHECK_EVERY_MS);
-if (!Number.isFinite(CHECK_EVERY_MS) || CHECK_EVERY_MS <= 0) {
+// Scheduling:
+// - By default, checks run on a randomized cadence between 15 and 35 minutes.
+// - For backwards-compatibility, you can pin a fixed cadence by setting CHECK_EVERY_MS.
+const DEFAULT_CHECK_EVERY_MIN_MS = 15 * 60 * 1000;
+const DEFAULT_CHECK_EVERY_MAX_MS = 35 * 60 * 1000;
+const FIXED_CHECK_EVERY_MS = process.env.CHECK_EVERY_MS ? Number(process.env.CHECK_EVERY_MS) : undefined;
+if (FIXED_CHECK_EVERY_MS !== undefined && (!Number.isFinite(FIXED_CHECK_EVERY_MS) || FIXED_CHECK_EVERY_MS <= 0)) {
   throw new Error('CHECK_EVERY_MS must be a positive number (milliseconds)');
+}
+const CHECK_EVERY_MIN_MS = Number(process.env.CHECK_EVERY_MIN_MS ?? DEFAULT_CHECK_EVERY_MIN_MS);
+const CHECK_EVERY_MAX_MS = Number(process.env.CHECK_EVERY_MAX_MS ?? DEFAULT_CHECK_EVERY_MAX_MS);
+if (!Number.isFinite(CHECK_EVERY_MIN_MS) || CHECK_EVERY_MIN_MS <= 0) {
+  throw new Error('CHECK_EVERY_MIN_MS must be a positive number (milliseconds)');
+}
+if (!Number.isFinite(CHECK_EVERY_MAX_MS) || CHECK_EVERY_MAX_MS <= 0) {
+  throw new Error('CHECK_EVERY_MAX_MS must be a positive number (milliseconds)');
+}
+if (CHECK_EVERY_MIN_MS > CHECK_EVERY_MAX_MS) {
+  throw new Error('CHECK_EVERY_MIN_MS must be <= CHECK_EVERY_MAX_MS');
+}
+
+function randomIntInclusive(min: number, max: number): number {
+  const a = Math.ceil(min);
+  const b = Math.floor(max);
+  return Math.floor(Math.random() * (b - a + 1)) + a;
+}
+
+function nextCheckDelayMs(): number {
+  if (FIXED_CHECK_EVERY_MS !== undefined) return FIXED_CHECK_EVERY_MS;
+  return randomIntInclusive(CHECK_EVERY_MIN_MS, CHECK_EVERY_MAX_MS);
 }
 
 function formatInterval(ms: number): string {
@@ -81,6 +106,11 @@ function formatInterval(ms: number): string {
   if (sec < 60) return `${sec} секунд`;
   const min = Math.round(sec / 60);
   return `${min} хвилин`;
+}
+
+function formatIntervalRange(minMs: number, maxMs: number): string {
+  if (minMs === maxMs) return formatInterval(minMs);
+  return `${formatInterval(minMs)}–${formatInterval(maxMs)}`;
 }
 
 function normalizeHtml(html: string): string {
@@ -492,9 +522,7 @@ async function watchLikeWatchCommand(ctx: any): Promise<void> {
   });
 
   await ctx.reply(
-    `Перевірка відключень електроенергії увімкнена ✅\nЯ буду перевіряти кожні ${formatInterval(
-      CHECK_EVERY_MS,
-    )} та сповіщати вас, якщо графік відключень електроенергії зміниться.`,
+    'Перевірка відключень електроенергії увімкнена ✅\nЯ буду сповіщати вас, якщо графік відключень електроенергії зміниться.',
   );
 
   // Do an immediate baseline check (no notification on first snapshot)
@@ -681,7 +709,7 @@ bot.on('text', async (ctx) => {
           'Збережено ✅',
           `Групи: ${groups.join(', ')}`,
           '',
-          `Сповіщення: УВІМК. (перевіряю кожні ${formatInterval(CHECK_EVERY_MS)})`,
+          'Сповіщення: УВІМК.',
         ].join('\n'),
       );
 
@@ -763,19 +791,27 @@ async function main() {
     // ignore: bot can still run even if Telegram command registration fails
   }
 
-  // Initial check shortly after boot, then every CHECK_EVERY_MS
+  // Initial check shortly after boot, then keep scheduling the next run with a randomized delay.
+  const scheduleNext = () => {
+    const delayMs = nextCheckDelayMs();
+    console.log(`Next scheduled check in ${delayMs}ms (${formatInterval(delayMs)})`);
+    setTimeout(() => {
+      console.log('Checking all watching chats...', new Date().toISOString());
+      runStateOp(async () => {
+        await checkAllWatchingChats();
+      })
+        .catch(() => undefined)
+        .finally(() => scheduleNext());
+    }, delayMs);
+  };
+
   setTimeout(() => {
     runStateOp(async () => {
       await checkAllWatchingChats();
-    }).catch(() => undefined);
+    })
+      .catch(() => undefined)
+      .finally(() => scheduleNext());
   }, 2000);
-
-  setInterval(() => {
-    console.log('Checking all watching chats...', new Date().toISOString());
-    runStateOp(async () => {
-      await checkAllWatchingChats();
-    }).catch(() => undefined);
-  }, CHECK_EVERY_MS);
 
   // If this bot was previously configured with a webhook, long-polling will fail.
   // Clearing webhook here makes long-polling startup more reliable across deploys.
@@ -805,7 +841,11 @@ async function main() {
   }
   
   // eslint-disable-next-line no-console
-  console.log(`Bot is running.. Scheduler interval: ${CHECK_EVERY_MS}ms`);
+  console.log(
+    FIXED_CHECK_EVERY_MS !== undefined
+      ? `Bot is running.. Scheduler interval: ${FIXED_CHECK_EVERY_MS}ms`
+      : `Bot is running.. Scheduler interval: randomized ${CHECK_EVERY_MIN_MS}ms..${CHECK_EVERY_MAX_MS}ms`,
+  );
 }
 
 main().then(() => {
