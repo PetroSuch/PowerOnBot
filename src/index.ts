@@ -791,6 +791,14 @@ async function main() {
     // ignore: bot can still run even if Telegram command registration fails
   }
 
+  // const message = 'Ось і настав вечір п\'ятниці, а я тут ще працюю 🌙\nМабуть що час відпочити і набратись сил для наступного дня 🌞\nВсім бажаю гарного вечора і доброї ночі 🌙\nЯкщо вам потрібна допомога, не соромтеся звертатися до мене 🤝\nЯ завжди готовий допомогти вам 💪\nВаш Енерго-Бот 🤖';
+  // setTimeout(async () => {
+  //   const users = Object.keys(state.users);
+  //   for (const userId of users) {
+  //     await bot.telegram.sendMessage(userId, message);
+  //   }
+  // }, 2000);
+
   // Initial check shortly after boot, then keep scheduling the next run with a randomized delay.
   const scheduleNext = () => {
     const delayMs = nextCheckDelayMs();
