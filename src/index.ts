@@ -474,7 +474,7 @@ async function checkOneChat(chatId: string, user: UserState, forceCheck: boolean
       await bot.telegram.sendMessage(
         chatId,
         [
-          '🗓️ Графік відключень на завтра змінився!',
+          '🗓️ Зʼявився графік відключень на завтра!',
           ' ',
           tomorrowWatchedText || '(Не вдалося прочитати текст)',
           '',
