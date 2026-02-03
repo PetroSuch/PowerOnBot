@@ -368,6 +368,8 @@ async function checkOneChat(chatId: string, user: UserState, forceCheck: boolean
     const watchedText = [...headerLines, '', ...selectedLines].join('\n').trim();
     const watchedGroupsText = selectedLines.join('\n').trim();
     const prev = user.lastLoeWatchedText ? extractGroupLinesOnly(user.lastLoeWatchedText) : undefined;
+    const prevTomorrowGroups = user.lastLoeTomorrowWatchedText ? extractGroupLinesOnly(user.lastLoeTomorrowWatchedText) : undefined;
+    const isPrevSameAsTomorrowGroups = watchedGroupsText === prevTomorrowGroups;
     user.lastLoeCheckedAt = new Date().toISOString();
     user.lastLoeError = undefined;
     
@@ -395,11 +397,11 @@ async function checkOneChat(chatId: string, user: UserState, forceCheck: boolean
       user.lastLoeWatchedText = watchedText;
       user.lastLoeNotifiedAt = new Date().toISOString();
       await writeStateToDisk(state);
-
+      
       await bot.telegram.sendMessage(
         chatId,
         [
-          forceCheck ? '🔥 Оновлення перевірено!' : '🔥 Графік відключень на сьогодні змінився!',
+          forceCheck ? '🔥 Оновлення перевірено!' : isPrevSameAsTomorrowGroups ? '🔥 Графік відключень на сьогодні!' : '🔥 Графік відключень на сьогодні змінився!',
           ' ',
           watchedText || '(Не вдалося прочитати текст)',
           '',
@@ -430,6 +432,8 @@ async function checkOneChat(chatId: string, user: UserState, forceCheck: boolean
       .split('\n')
       .slice(0, 2)
       .filter((l) => l.length > 0);
+    const tomorrowHeaderLinesPrev = normalizeMultilineText(user.lastLoeTomorrowWatchedText ?? '').split('\n').slice(0, 2).filter((l) => l.length > 0);
+    const tomorrowHeaderLinesCurrent = normalizeMultilineText(tomorrow.itemText).split('\n').slice(0, 2).filter((l) => l.length > 0);
     const tomorrowWatchedText = [...tomorrowHeaderLines, '', ...tomorrowSelectedLines].join('\n').trim();
     const tomorrowWatchedGroupsText = tomorrowSelectedLines.join('\n').trim();
     const tomorrowPrevGroupsOnly = user.lastLoeTomorrowWatchedText
@@ -467,14 +471,14 @@ async function checkOneChat(chatId: string, user: UserState, forceCheck: boolean
       return;
     }
 
-    if (tomorrowPrevGroupsOnly !== tomorrowWatchedGroupsText) {
+    if (tomorrowPrevGroupsOnly !== tomorrowWatchedGroupsText && tomorrowHeaderLinesPrev !== tomorrowHeaderLinesCurrent) {
       user.lastLoeTomorrowWatchedText = tomorrowWatchedText;
       user.lastLoeTomorrowNotifiedAt = new Date().toISOString();
       await writeStateToDisk(state);
       await bot.telegram.sendMessage(
         chatId,
         [
-          '🗓️ Зʼявився графік відключень на завтра!',
+          '🗓️ Графік відключень на завтра змінився!',
           ' ',
           tomorrowWatchedText || '(Не вдалося прочитати текст)',
           '',
