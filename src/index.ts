@@ -368,11 +368,10 @@ async function checkOneChat(chatId: string, user: UserState, forceCheck: boolean
     const watchedText = [...headerLines, '', ...selectedLines].join('\n').trim();
     const watchedGroupsText = selectedLines.join('\n').trim();
     const prev = user.lastLoeWatchedText ? extractGroupLinesOnly(user.lastLoeWatchedText) : undefined;
-    const prevTomorrowGroups = user.lastLoeTomorrowWatchedText ? extractGroupLinesOnly(user.lastLoeTomorrowWatchedText) : undefined;
-    const isPrevSameAsTomorrowGroups = watchedGroupsText === prevTomorrowGroups;
     user.lastLoeCheckedAt = new Date().toISOString();
     user.lastLoeError = undefined;
-    
+    const isNotifiedYesterday = user.lastLoeNotifiedAt ? new Date(user.lastLoeNotifiedAt).getDate() !== new Date().getDate() : false;
+
     if (!prev) {
       // Baseline snapshot for today (do not spam on first seen unless forceCheck)
       user.lastLoeWatchedText = watchedText;
@@ -393,15 +392,16 @@ async function checkOneChat(chatId: string, user: UserState, forceCheck: boolean
             .join('\n'),
         );
       }
-    } else if (prev !== watchedGroupsText || forceCheck) {
+    } else if (prev !== watchedGroupsText || isNotifiedYesterday || forceCheck) {
       user.lastLoeWatchedText = watchedText;
       user.lastLoeNotifiedAt = new Date().toISOString();
+
       await writeStateToDisk(state);
       
       await bot.telegram.sendMessage(
         chatId,
         [
-          forceCheck ? '🔥 Оновлення перевірено!' : isPrevSameAsTomorrowGroups ? '🔥 Графік відключень на сьогодні!' : '🔥 Графік відключень на сьогодні змінився!',
+          forceCheck ? '🔥 Оновлення перевірено!' : isNotifiedYesterday ? '🔥 Графік відключень на сьогодні!' : '🔥 Графік відключень на сьогодні змінився!',
           ' ',
           watchedText || '(Не вдалося прочитати текст)',
           '',
