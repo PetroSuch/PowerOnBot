@@ -73,7 +73,7 @@ const STATE_FILE_PATH = path.join(process.cwd(), 'label-state.json');
 // - By default, checks run on a randomized cadence between 15 and 35 minutes.
 // - For backwards-compatibility, you can pin a fixed cadence by setting CHECK_EVERY_MS.
 const DEFAULT_CHECK_EVERY_MIN_MS = 15 * 60 * 1000;
-const DEFAULT_CHECK_EVERY_MAX_MS = 35 * 60 * 1000;
+const DEFAULT_CHECK_EVERY_MAX_MS = 25 * 60 * 1000;
 const FIXED_CHECK_EVERY_MS = process.env.CHECK_EVERY_MS ? Number(process.env.CHECK_EVERY_MS) : undefined;
 if (FIXED_CHECK_EVERY_MS !== undefined && (!Number.isFinite(FIXED_CHECK_EVERY_MS) || FIXED_CHECK_EVERY_MS <= 0)) {
   throw new Error('CHECK_EVERY_MS must be a positive number (milliseconds)');
@@ -452,7 +452,7 @@ async function checkOneChat(chatId: string, user: UserState, forceCheck: boolean
       return;
     }
 
-    if (appeared) {
+    if (appeared || forceCheck) {
       user.lastLoeTomorrowWatchedText = tomorrowWatchedText;
       user.lastLoeTomorrowNotifiedAt = new Date().toISOString();
       await writeStateToDisk(state);
@@ -795,7 +795,7 @@ async function main() {
     // ignore: bot can still run even if Telegram command registration fails
   }
 
-  // const message = 'Ось і настав вечір п\'ятниці, а я тут ще працюю 🌙\nМабуть що час відпочити і набратись сил для наступного дня 🌞\nВсім бажаю гарного вечора і доброї ночі 🌙\nЯкщо вам потрібна допомога, не соромтеся звертатися до мене 🤝\nЯ завжди готовий допомогти вам 💪\nВаш Енерго-Бот 🤖';
+  // const message = `Робочий тиждень добігає кінця, а вечір п’ятниці вже тут 🌙\nСаме час перепочити, перезавантажитися й підготуватися до нового дня 🌞\nНехай у кожного буде затишний вечір, тиха ніч, багато світла та мирні вихідні 🕊️✨\nЯкщо виникнуть питання чи потрібна буде підтримка — я завжди на зв’язку 🤝\nІз задоволенням допоможу 💪\nВаш Енерго-Бот 🤖`;
   // setTimeout(async () => {
   //   const users = Object.keys(state.users);
   //   for (const userId of users) {
