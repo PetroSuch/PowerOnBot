@@ -864,7 +864,7 @@ async function main() {
   // eslint-disable-next-line no-console
   console.log(
     FIXED_CHECK_EVERY_MS !== undefined
-      ? `Bot is running.. Schesduler interval: ${FIXED_CHECK_EVERY_MS}ms`
+      ? `Bot is running.. Scheduler interval: ${FIXED_CHECK_EVERY_MS}ms`
       : `Bot is running.. Scheduler interval: randomized ${CHECK_EVERY_MIN_MS}ms..${CHECK_EVERY_MAX_MS}ms`,
   );
 }
