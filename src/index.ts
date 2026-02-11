@@ -358,7 +358,13 @@ async function checkOneChat(chatId: string, user: UserState, forceCheck: boolean
 
     // ---- TODAY ----
     const groupMap = parseGroupSchedulesFromText(today.itemText);
-    const selectedLines = user.groups.map((g) => groupMap[g] ?? `Група ${g}. (Не знайдено в оновленні)`);
+    let selectedLines = user.groups
+      .map((g) => groupMap[g] ?? `Група ${g}. (Не знайдено в оновленні)`)
+      .map((line) => line + '\n')
+      .map((line) => line.replace(/,/g, '\n'))
+      .map((line) => line.replace('Електроенергії немає', '\nЕлектроенергії немає:\n'))
+      .map((line) => line.replace(/ з /g, 'з '));
+
     // Keep the top 2 lines if present (usually "Графік ...", "Інформація станом ...")
     const headerLines = normalizeMultilineText(today.itemText)
       .split('\n')
@@ -426,7 +432,10 @@ async function checkOneChat(chatId: string, user: UserState, forceCheck: boolean
     const tomorrowGroupMap = parseGroupSchedulesFromText(tomorrow.itemText);
     const tomorrowSelectedLines = user.groups.map(
       (g) => tomorrowGroupMap[g] ?? `Група ${g}. (Не знайдено в графіку на завтра)`,
-    );
+    ).map((line) => line + '\n')
+    .map((line) => line.replace(/,/g, '\n'))
+    .map((line) => line.replace('Електроенергії немає', '\nЕлектроенергії немає:\n'))
+    .map((line) => line.replace(/ з /g, 'з '));
     const hasAnyTomorrowDataForSelectedGroups = user.groups.some((g) => Boolean(tomorrowGroupMap[g]));
     const tomorrowHeaderLines = normalizeMultilineText(tomorrow.itemText)
       .split('\n')
