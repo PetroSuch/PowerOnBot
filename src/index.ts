@@ -73,7 +73,7 @@ const STATE_FILE_PATH = path.join(process.cwd(), 'label-state.json');
 // - By default, checks run on a randomized cadence between 15 and 35 minutes.
 // - For backwards-compatibility, you can pin a fixed cadence by setting CHECK_EVERY_MS.
 const DEFAULT_CHECK_EVERY_MIN_MS = 15 * 60 * 1000;
-const DEFAULT_CHECK_EVERY_MAX_MS = 25 * 60 * 1000;
+const DEFAULT_CHECK_EVERY_MAX_MS = 20 * 60 * 1000;
 const FIXED_CHECK_EVERY_MS = process.env.CHECK_EVERY_MS ? Number(process.env.CHECK_EVERY_MS) : undefined;
 if (FIXED_CHECK_EVERY_MS !== undefined && (!Number.isFinite(FIXED_CHECK_EVERY_MS) || FIXED_CHECK_EVERY_MS <= 0)) {
   throw new Error('CHECK_EVERY_MS must be a positive number (milliseconds)');
@@ -348,154 +348,162 @@ async function checkOneChat(chatId: string, user: UserState, forceCheck: boolean
     }
     return;
   }
-
-
+  
   try {
     const { today, tomorrow } = await fetchLoePhotoGraficMenuItems();
-    if (!today) {
-      throw new Error('LOE API не повернув елемент меню з name="Today"');
-    }
 
-    // ---- TODAY ----
-    const groupMap = parseGroupSchedulesFromText(today.itemText);
-    let selectedLines = user.groups
-      .map((g) => groupMap[g] ?? `Група ${g}. (Не знайдено в оновленні)`)
-      .map((line) => line + '\n')
-      .map((line) => line.replace(/,/g, '\n'))
-      .map((line) => line.replace('Електроенергії немає', '\nЕлектроенергії немає:\n'))
-      .map((line) => line.replace(/ з /g, 'з '));
-
-    // Keep the top 2 lines if present (usually "Графік ...", "Інформація станом ...")
-    const headerLines = normalizeMultilineText(today.itemText)
-      .split('\n')
-      .slice(0, 2)
-      .filter((l) => l.length > 0);
-
-    const watchedText = [...headerLines, '', ...selectedLines].join('\n').trim();
-    const watchedGroupsText = selectedLines.join('\n').trim();
-    const prev = user.lastLoeWatchedText ? extractGroupLinesOnly(user.lastLoeWatchedText) : undefined;
-    user.lastLoeCheckedAt = new Date().toISOString();
-    user.lastLoeError = undefined;
-    const isNotifiedYesterday = user.lastLoeNotifiedAt ? new Date(user.lastLoeNotifiedAt).getDate() !== new Date().getDate() : false;
-
-    if (!prev) {
-      // Baseline snapshot for today (do not spam on first seen unless forceCheck)
-      user.lastLoeWatchedText = watchedText;
-      await writeStateToDisk(state);
-      if (forceCheck) {
-        user.lastLoeNotifiedAt = new Date().toISOString();
+    if(today && today.itemText){
+      // ---- TODAY ----
+      const groupMap = parseGroupSchedulesFromText(today.itemText);
+      let selectedLines = user.groups
+        .map((g) => groupMap[g] ?? `Група ${g}. (Не знайдено в оновленні)`);
+  
+      // Keep the top 2 lines if present (usually "Графік ...", "Інформація станом ...")
+      const headerLines = normalizeMultilineText(today.itemText)
+        .split('\n')
+        .slice(0, 2)
+        .filter((l) => l.length > 0);
+  
+      const watchedText = [...headerLines, '', ...selectedLines].join('\n').trim();
+      const watchedGroupsText = selectedLines.join('\n').trim();
+      const prev = user.lastLoeWatchedText ? extractGroupLinesOnly(user.lastLoeWatchedText) : undefined;
+      user.lastLoeCheckedAt = new Date().toISOString();
+      user.lastLoeError = undefined;
+      const isNotifiedYesterday = user.lastLoeNotifiedAt ? new Date(user.lastLoeNotifiedAt).getDate() !== new Date().getDate() : false;
+  
+      const formattedSelectedLines = selectedLines
+          .map((line) => line + '\n')
+          .map((line) => line.replace(/,/g, '\n'))
+          .map((line) => line.replace('Електроенергії немає', '\nЕлектроенергії немає:\n'))
+          .map((line) => line.replace(/ з /g, 'з '));
+      const watchedTextFormatted = [...headerLines, '', ...formattedSelectedLines].join('\n').trim();
+  
+      if (!prev) {
+        // Baseline snapshot for today (do not spam on first seen unless forceCheck)
+        user.lastLoeWatchedText = watchedText;
+  
         await writeStateToDisk(state);
+        if (forceCheck) {
+          user.lastLoeNotifiedAt = new Date().toISOString();
+          await writeStateToDisk(state);
+          await bot.telegram.sendMessage(
+            chatId,
+            [
+              '🔥 Оновлення перевірено!',
+              ' ',
+              watchedTextFormatted || '(Не вдалося прочитати текст)',
+              '',
+              today.imageUrl ? `\nГрафік відключень: ${today.imageUrl}` : '',
+            ]
+              .filter(Boolean)
+              .join('\n'),
+          );
+        }
+      } else if (prev !== watchedGroupsText || isNotifiedYesterday || forceCheck) {
+        user.lastLoeWatchedText = watchedText;
+        user.lastLoeNotifiedAt = new Date().toISOString();
+  
+        await writeStateToDisk(state);
+        
         await bot.telegram.sendMessage(
           chatId,
           [
-            '🔥 Оновлення перевірено!',
+            forceCheck ? '🔥 Оновлення перевірено!' : isNotifiedYesterday ? '🔥 Графік відключень на сьогодні!' : '🔥 Графік відключень на сьогодні змінився!',
             ' ',
-            watchedText || '(Не вдалося прочитати текст)',
+            watchedTextFormatted || '(Не вдалося прочитати текст)',
             '',
-            today.imageUrl ? `\nГрафік відключень: ${today.imageUrl}` : '',
+            today.imageUrl ? `\nГрафік відключень на сьогодні: ${today.imageUrl}` : '',
           ]
             .filter(Boolean)
             .join('\n'),
         );
       }
-    } else if (prev !== watchedGroupsText || isNotifiedYesterday || forceCheck) {
-      user.lastLoeWatchedText = watchedText;
-      user.lastLoeNotifiedAt = new Date().toISOString();
-
-      await writeStateToDisk(state);
-      
-      await bot.telegram.sendMessage(
-        chatId,
-        [
-          forceCheck ? '🔥 Оновлення перевірено!' : isNotifiedYesterday ? '🔥 Графік відключень на сьогодні!' : '🔥 Графік відключень на сьогодні змінився!',
-          ' ',
-          watchedText || '(Не вдалося прочитати текст)',
-          '',
-          today.imageUrl ? `\nГрафік відключень на сьогодні: ${today.imageUrl}` : '',
-        ]
-          .filter(Boolean)
-          .join('\n'),
-      );
     }
 
-    // ---- TOMORROW ----
-    user.lastLoeTomorrowCheckedAt = new Date().toISOString();
-    user.lastLoeTomorrowError = undefined;
+    if(tomorrow && tomorrow.itemText){
+      // ---- TOMORROW ----
+      user.lastLoeTomorrowCheckedAt = new Date().toISOString();
+      user.lastLoeTomorrowError = undefined;
+  
+      const tomorrowGroupMap = parseGroupSchedulesFromText(tomorrow.itemText);
+      const tomorrowSelectedLines = user.groups.map(
+        (g) => tomorrowGroupMap[g] ?? `Група ${g}. (Не знайдено в графіку на завтра)`,
+      );
+      const hasAnyTomorrowDataForSelectedGroups = user.groups.some((g) => Boolean(tomorrowGroupMap[g]));
+      const tomorrowHeaderLines = normalizeMultilineText(tomorrow.itemText)
+        .split('\n')
+        .slice(0, 2)
+        .filter((l) => l.length > 0);
+      const tomorrowHeaderLinesPrev = normalizeMultilineText(user.lastLoeTomorrowWatchedText ?? '').split('\n').slice(0, 2).filter((l) => l.length > 0);
+      const tomorrowHeaderLinesCurrent = normalizeMultilineText(tomorrow.itemText).split('\n').slice(0, 2).filter((l) => l.length > 0);
+      const tomorrowWatchedText = [...tomorrowHeaderLines, '', ...tomorrowSelectedLines].join('\n').trim();
+      const tomorrowWatchedGroupsText = tomorrowSelectedLines.join('\n').trim();
+      const tomorrowPrevGroupsOnly = user.lastLoeTomorrowWatchedText
+        ? extractGroupLinesOnly(user.lastLoeTomorrowWatchedText)
+        : undefined;
+  
+      const appeared = user.lastLoeTomorrowStatus !== 'present';
+      user.lastLoeTomorrowStatus = 'present';
+      
+      const formattedTomorrowSelectedLines = tomorrowSelectedLines
+          .map((line) => line + '\n')
+          .map((line) => line.replace(/,/g, '\n'))
+          .map((line) => line.replace('Електроенергії немає', '\nЕлектроенергії немає:\n'))
+          .map((line) => line.replace(/ з /g, 'з '));
+      const tomorrowWatchedTextFormatted = [...tomorrowHeaderLines, '', ...formattedTomorrowSelectedLines].join('\n').trim();
+  
+      // If LOE published "Tomorrow" but there is no data for the user's selected groups,
+      // do not send an "empty" notification like "(Не знайдено в графіку на завтра)".
+      // Still store a snapshot so we can notify later if data for the groups appears.
+      if (!hasAnyTomorrowDataForSelectedGroups) {
+        user.lastLoeTomorrowWatchedText = tomorrowWatchedText;
+        await writeStateToDisk(state);
+        return;
+      }
+  
+      if (appeared || forceCheck) {
+        user.lastLoeTomorrowWatchedText = tomorrowWatchedText;
+        user.lastLoeTomorrowNotifiedAt = new Date().toISOString();
+        await writeStateToDisk(state);
+        await bot.telegram.sendMessage(
+          chatId,
+          [
+            '🗓️ Зʼявився графік відключень на завтра!',
+            ' ',
+            tomorrowWatchedTextFormatted || '(Не вдалося прочитати текст)',
+            '',
+            tomorrow.imageUrl ? `\nГрафік (завтра): ${tomorrow.imageUrl}` : '',
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        );
+        return;
+      }
+  
+      if (tomorrowPrevGroupsOnly !== tomorrowWatchedGroupsText && tomorrowHeaderLinesPrev !== tomorrowHeaderLinesCurrent) {
+        user.lastLoeTomorrowWatchedText = tomorrowWatchedText;
+        user.lastLoeTomorrowNotifiedAt = new Date().toISOString();
+        await writeStateToDisk(state);
+        await bot.telegram.sendMessage(
+          chatId,
+          [
+            '🗓️ Графік відключень на завтра змінився!',
+            ' ',
+            tomorrowWatchedTextFormatted || '(Не вдалося прочитати текст)',
+            '',
+            tomorrow.imageUrl ? `\nГрафік (завтра): ${tomorrow.imageUrl}` : '',
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        );
+        return;
+      }
+    }
 
     if (!tomorrow) {
       // Tomorrow is not published yet
       user.lastLoeTomorrowStatus = 'missing';
       await writeStateToDisk(state);
-      return;
-    }
-
-    const tomorrowGroupMap = parseGroupSchedulesFromText(tomorrow.itemText);
-    const tomorrowSelectedLines = user.groups.map(
-      (g) => tomorrowGroupMap[g] ?? `Група ${g}. (Не знайдено в графіку на завтра)`,
-    ).map((line) => line + '\n')
-    .map((line) => line.replace(/,/g, '\n'))
-    .map((line) => line.replace('Електроенергії немає', '\nЕлектроенергії немає:\n'))
-    .map((line) => line.replace(/ з /g, 'з '));
-    const hasAnyTomorrowDataForSelectedGroups = user.groups.some((g) => Boolean(tomorrowGroupMap[g]));
-    const tomorrowHeaderLines = normalizeMultilineText(tomorrow.itemText)
-      .split('\n')
-      .slice(0, 2)
-      .filter((l) => l.length > 0);
-    const tomorrowHeaderLinesPrev = normalizeMultilineText(user.lastLoeTomorrowWatchedText ?? '').split('\n').slice(0, 2).filter((l) => l.length > 0);
-    const tomorrowHeaderLinesCurrent = normalizeMultilineText(tomorrow.itemText).split('\n').slice(0, 2).filter((l) => l.length > 0);
-    const tomorrowWatchedText = [...tomorrowHeaderLines, '', ...tomorrowSelectedLines].join('\n').trim();
-    const tomorrowWatchedGroupsText = tomorrowSelectedLines.join('\n').trim();
-    const tomorrowPrevGroupsOnly = user.lastLoeTomorrowWatchedText
-      ? extractGroupLinesOnly(user.lastLoeTomorrowWatchedText)
-      : undefined;
-
-    const appeared = user.lastLoeTomorrowStatus !== 'present';
-    user.lastLoeTomorrowStatus = 'present';
-
-    // If LOE published "Tomorrow" but there is no data for the user's selected groups,
-    // do not send an "empty" notification like "(Не знайдено в графіку на завтра)".
-    // Still store a snapshot so we can notify later if data for the groups appears.
-    if (!hasAnyTomorrowDataForSelectedGroups) {
-      user.lastLoeTomorrowWatchedText = tomorrowWatchedText;
-      await writeStateToDisk(state);
-      return;
-    }
-
-    if (appeared || forceCheck) {
-      user.lastLoeTomorrowWatchedText = tomorrowWatchedText;
-      user.lastLoeTomorrowNotifiedAt = new Date().toISOString();
-      await writeStateToDisk(state);
-      await bot.telegram.sendMessage(
-        chatId,
-        [
-          '🗓️ Зʼявився графік відключень на завтра!',
-          ' ',
-          tomorrowWatchedText || '(Не вдалося прочитати текст)',
-          '',
-          tomorrow.imageUrl ? `\nГрафік (завтра): ${tomorrow.imageUrl}` : '',
-        ]
-          .filter(Boolean)
-          .join('\n'),
-      );
-      return;
-    }
-
-    if (tomorrowPrevGroupsOnly !== tomorrowWatchedGroupsText && tomorrowHeaderLinesPrev !== tomorrowHeaderLinesCurrent) {
-      user.lastLoeTomorrowWatchedText = tomorrowWatchedText;
-      user.lastLoeTomorrowNotifiedAt = new Date().toISOString();
-      await writeStateToDisk(state);
-      await bot.telegram.sendMessage(
-        chatId,
-        [
-          '🗓️ Графік відключень на завтра змінився!',
-          ' ',
-          tomorrowWatchedText || '(Не вдалося прочитати текст)',
-          '',
-          tomorrow.imageUrl ? `\nГрафік (завтра): ${tomorrow.imageUrl}` : '',
-        ]
-          .filter(Boolean)
-          .join('\n'),
-      );
       return;
     }
 
