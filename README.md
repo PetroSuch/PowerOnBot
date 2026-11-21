@@ -1,78 +1,53 @@
 # Schedule Watcher Bot
 
-Telegram bot that checks the schedule page and extracts `.periods_items`. It stores **City / Address / HouseNumber per chat** and compares the latest `.periods_items` HTML with the last saved one:
-
-- If it’s the **same**: no notification
-- If it’s **different**: sends a Telegram message that it changed
+A Telegram bot that monitors Lvivoblenergo outage schedules for the groups selected in each chat. It sends alerts when the selected schedules change or when tomorrow’s schedule becomes available.
 
 ## Setup
 
-## Quick commands
+For local development, create a `.env` file next to `package.json` with your token from BotFather:
 
-### Dev / run
+```dotenv
+BOT_TOKEN=YOUR_TELEGRAM_BOT_TOKEN
+```
+
+Run `npm ci` once, then `npm start` from the project root. Restart the bot after updating `.env`.
+
+You can also supply `BOT_TOKEN` through the shell. A shell value takes precedence over `.env`.
+
+PowerShell:
+
+```powershell
+npm ci
+$env:BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+npm start
+```
+
+Bash:
 
 ```bash
-npm install
+npm ci
 export BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN"
-npm run dev
+npm start
 ```
 
-### Production-ish run
+`npm start` builds the project and starts the bot. Use `npm run dev` to compile TypeScript as you edit.
 
-```bash
-npm install
-npm run build
-BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN" npm start
-```
+## Telegram commands
 
-### Optional: change check interval
+- `/start` prompts you to select outage groups and enables alerts after you save them.
+- `/groups_list` shows your selected groups.
+- `/add_group` adds groups. For example, send `/add_group 1.1; 3.2`.
+- `/remove_group` removes groups. For example, send `/remove_group 1.1`. Remove all groups to stop receiving alerts.
+- `/check` fetches the current schedules for your groups.
 
-```bash
-# e.g. 5 minutes
-export CHECK_EVERY_MS=300000
-```
+## Configuration
 
-### Optional: choose LOE API menu type / URL
+The bot checks shortly after startup and then at a random interval between 15 and 20 minutes. It saves each chat’s settings and schedule snapshots in `label-state.json` in the project root.
 
-```bash
-# default is photo-grafic (contains rawHtml/rawMobileHtml with schedules)
-export LOE_MENU_TYPE="photo-grafic"
-
-# or set an explicit URL
-export LOE_MENUS_URL="https://api.loe.lviv.ua/api/menus?page=1&type=photo-grafic"
-```
-
-1. Install deps:
-
-```bash
-npm install
-```
-
-2. Export your bot token:
-
-```bash
-export BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN"
-```
-
-3. Run:
-
-```bash
-npm run dev
-```
-
-## Using the bot
-
-- `/start` — show help
-- `/help` — show help (alias)
-- `/set City, Address, HouseNumber` — save your parameters for this chat
-  - Also accepted: `/set City | Address | HouseNumber`
-- `/watch` — enable notifications in the current chat (saved to `label-state.json`)
-- `/unwatch` — disable notifications
-- `/status` — show last check time / errors / URL
-- `/check` — manual check right now
-
-## Notes
-
-- State is persisted in `label-state.json` in the project root.
-- The bot checks every **CHECK_EVERY_MS** (default **15 minutes**) and once shortly after startup.
-
+| Environment variable | Purpose |
+| --- | --- |
+| `BOT_TOKEN` | Required Telegram bot token from BotFather. |
+| `CHECK_EVERY_MS` | Fixed check interval in milliseconds, for example `300000` for five minutes. |
+| `CHECK_EVERY_MIN_MS`, `CHECK_EVERY_MAX_MS` | Bounds for the random interval when a fixed interval is unset. |
+| `LOE_MENU_TYPE` | Lvivoblenergo menu type. Defaults to `photo-grafic`. |
+| `LOE_MENUS_URL` | Optional override for the [default schedule endpoint](https://api.loe.lviv.ua/api/menus?page=1&type=photo-grafic). |
