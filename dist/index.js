@@ -14,23 +14,9 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 var _a, _b, _c;
 Object.defineProperty(exports, "__esModule", { value: true });
 const telegraf_1 = require("telegraf");
-const cheerio_1 = require("cheerio");
 const promises_1 = __importDefault(require("node:fs/promises"));
 const node_path_1 = __importDefault(require("node:path"));
-const POSSIBLE_GROUPS = [
-    '1.1',
-    '1.2',
-    '2.1',
-    '2.2',
-    '3.1',
-    '3.2',
-    '4.1',
-    '4.2',
-    '5.1',
-    '5.2',
-    '6.1',
-    '6.2',
-];
+const schedule_1 = require("./schedule");
 const STATE_FILE_PATH = node_path_1.default.join(process.cwd(), 'label-state.json');
 try {
     process.loadEnvFile(node_path_1.default.join(process.cwd(), '.env'));
@@ -76,54 +62,6 @@ function formatInterval(ms) {
     const min = Math.round(sec / 60);
     return `${min} хвилин`;
 }
-function formatIntervalRange(minMs, maxMs) {
-    if (minMs === maxMs)
-        return formatInterval(minMs);
-    return `${formatInterval(minMs)}–${formatInterval(maxMs)}`;
-}
-function normalizeHtml(html) {
-    return html.replace(/\s+/g, ' ').trim();
-}
-function normalizeMultilineText(raw) {
-    return raw
-        .replace(/\r\n/g, '\n')
-        .split('\n')
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0)
-        .join('\n')
-        .trim();
-}
-function absoluteLoeMediaUrl(pathname) {
-    if (!pathname)
-        return '';
-    if (/^https?:\/\//i.test(pathname))
-        return pathname;
-    const p = pathname.startsWith('/') ? pathname : `/${pathname}`;
-    return `https://api.loe.lviv.ua${p}`;
-}
-function extractGroupLinesOnly(text) {
-    return normalizeMultilineText(text)
-        .split('\n')
-        .filter((l) => /^Група\s+\d+[.,]\d+\./i.test(l))
-        .join('\n')
-        .trim();
-}
-function textFromRawHtml(rawHtml) {
-    if (!rawHtml)
-        return '';
-    const $ = (0, cheerio_1.load)(rawHtml);
-    return normalizeMultilineText($.text());
-}
-function normalizeGroupId(raw) {
-    const s = raw.trim();
-    if (!s)
-        return null;
-    // Accept both dot and comma between numbers: 1.1 or 1,1
-    const m = s.match(/^(\d+)[.,](\d+)$/);
-    if (!m)
-        return null;
-    return `${Number(m[1])}.${Number(m[2])}`;
-}
 function parseGroupsFromUserInput(raw) {
     // Extract group-like tokens from free-form input.
     // Supports separators: comma or dot inside group id (1,1 or 1.1)
@@ -132,12 +70,12 @@ function parseGroupsFromUserInput(raw) {
     const re = /(\d+)[.,](\d+)/g;
     let m;
     while ((m = re.exec(raw)) !== null) {
-        const g = normalizeGroupId(`${m[1]}.${m[2]}`);
+        const g = (0, schedule_1.normalizeGroupId)(`${m[1]}.${m[2]}`);
         if (g && !out.includes(g))
             out.push(g);
     }
     // Validate against known possible groups
-    return out.filter((g) => POSSIBLE_GROUPS.includes(g));
+    return out.filter((g) => schedule_1.POSSIBLE_GROUPS.includes(g));
 }
 function formatPossibleGroups() {
     return [
@@ -150,86 +88,45 @@ function formatPossibleGroups() {
         '6.1, 6.2',
     ].join('\n');
 }
-function parseGroupSchedulesFromText(text) {
-    // Input example lines (from LOE rawHtml):
-    // "Група 1.1. Електроенергії немає з 05:30 до 09:00, з 16:00 до 19:30."
-    const lines = normalizeMultilineText(text).split('\n');
-    const map = {};
-    for (const line of lines) {
-        const m = line.match(/Група\s+(\d+\.\d+)\./i);
-        if (!m)
-            continue;
-        const g = normalizeGroupId(m[1]);
-        if (!g)
-            continue;
-        map[g] = line;
-    }
-    return map;
-}
-function fetchLoePhotoGraficMenuItems() {
-    return __awaiter(this, void 0, void 0, function* () {
-        var _a, _b;
-        const defaultType = 'photo-grafic';
-        const type = String((_a = process.env.LOE_MENU_TYPE) !== null && _a !== void 0 ? _a : defaultType);
-        const sourceUrl = String((_b = process.env.LOE_MENUS_URL) !== null && _b !== void 0 ? _b : `https://api.loe.lviv.ua/api/menus?page=1&type=${encodeURIComponent(type)}`);
-        const res = yield fetch(sourceUrl, {
-            headers: {
-                accept: 'application/ld+json,application/json;q=0.9,*/*;q=0.8',
-                'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
-            },
-        });
-        if (!res.ok) {
-            throw new Error(`HTTP ${res.status} when calling LOE API`);
-        }
-        const data = (yield res.json());
-        const menus = Array.isArray(data) ? data : data === null || data === void 0 ? void 0 : data['hydra:member'];
-        const menu = menus === null || menus === void 0 ? void 0 : menus[0];
-        if (!menu || !Array.isArray(menu.menuItems)) {
-            throw new Error('LOE API response did not contain a menu with menuItems');
-        }
-        const todayItem = menu.menuItems.find((item) => item.name === 'Today');
-        const tomorrowItem = menu.menuItems.find((item) => item.name === 'Tomorrow');
-        const today = todayItem
-            ? {
-                item: todayItem,
-                itemText: textFromRawHtml(todayItem.rawMobileHtml || todayItem.rawHtml),
-                imageUrl: absoluteLoeMediaUrl(todayItem.imageUrl || todayItem.slug),
-            }
-            : undefined;
-        const tomorrow = tomorrowItem
-            ? {
-                item: tomorrowItem,
-                itemText: textFromRawHtml(tomorrowItem.rawMobileHtml || tomorrowItem.rawHtml),
-                imageUrl: absoluteLoeMediaUrl(tomorrowItem.imageUrl || tomorrowItem.slug),
-            }
-            : undefined;
-        return { menuName: menu.name, sourceUrl, today, tomorrow };
-    });
-}
-function readStateFromDisk() {
+function readStateFile() {
     return __awaiter(this, void 0, void 0, function* () {
         try {
-            const raw = yield promises_1.default.readFile(STATE_FILE_PATH, 'utf8');
-            const parsed = JSON.parse(raw);
-            if (typeof parsed === 'object' &&
-                parsed !== null &&
-                'users' in parsed &&
-                typeof parsed.users === 'object' &&
-                parsed.users !== null) {
-                return normalizeStateShape(parsed);
-            }
-            return { users: {} };
+            return yield promises_1.default.readFile(STATE_FILE_PATH, 'utf8');
         }
-        catch (err) {
-            if ((err === null || err === void 0 ? void 0 : err.code) === 'ENOENT')
-                return { users: {} };
-            // If JSON is corrupt, don't crash the bot — start fresh.
-            return { users: {} };
+        catch (error) {
+            const code = error.code;
+            if (code === 'ENOENT')
+                return undefined;
+            throw new Error(`Unable to read bot state at ${STATE_FILE_PATH} (${code !== null && code !== void 0 ? code : 'unknown error'})`);
         }
+    });
+}
+let lastSavedState;
+function readStateFromDisk() {
+    return __awaiter(this, void 0, void 0, function* () {
+        const raw = yield readStateFile();
+        if (raw === undefined)
+            return { users: {} };
+        let parsed;
+        try {
+            parsed = JSON.parse(raw.replace(/^\uFEFF/, ''));
+        }
+        catch (_a) {
+            throw new Error(`Invalid JSON in bot state at ${STATE_FILE_PATH}`);
+        }
+        if (!parsed || typeof parsed !== 'object' || !('users' in parsed)
+            || !parsed.users || typeof parsed.users !== 'object' || Array.isArray(parsed.users)) {
+            throw new Error(`Expected a users object in bot state at ${STATE_FILE_PATH}`);
+        }
+        const loaded = normalizeStateShape(parsed);
+        lastSavedState = raw;
+        return loaded;
     });
 }
 function normalizeStateShape(input) {
-    const rawUsers = (input === null || input === void 0 ? void 0 : input.users) && typeof input.users === 'object' ? input.users : {};
+    const misplacedUsers = Object.fromEntries(Object.entries(input).filter(([chatId, user]) => /^-?\d+$/.test(chatId) && user && typeof user === 'object' && 'watching' in user && typeof user.watching === 'boolean'));
+    // Preserve chat records accidentally saved alongside the users object.
+    const rawUsers = Object.assign(Object.assign({}, misplacedUsers), input.users);
     const users = {};
     for (const [chatId, raw] of Object.entries(rawUsers)) {
         const u = raw && typeof raw === 'object' ? raw : {};
@@ -243,10 +140,12 @@ function normalizeStateShape(input) {
             lastLoeCheckedAt: typeof u.lastLoeCheckedAt === 'string' ? u.lastLoeCheckedAt : undefined,
             lastLoeNotifiedAt: typeof u.lastLoeNotifiedAt === 'string' ? u.lastLoeNotifiedAt : undefined,
             lastLoeWatchedText: typeof u.lastLoeWatchedText === 'string' ? u.lastLoeWatchedText : undefined,
+            lastLoeScheduleDate: typeof u.lastLoeScheduleDate === 'string' ? u.lastLoeScheduleDate : undefined,
             lastLoeError: typeof u.lastLoeError === 'string' ? u.lastLoeError : undefined,
             lastLoeTomorrowCheckedAt: typeof u.lastLoeTomorrowCheckedAt === 'string' ? u.lastLoeTomorrowCheckedAt : undefined,
             lastLoeTomorrowNotifiedAt: typeof u.lastLoeTomorrowNotifiedAt === 'string' ? u.lastLoeTomorrowNotifiedAt : undefined,
             lastLoeTomorrowWatchedText: typeof u.lastLoeTomorrowWatchedText === 'string' ? u.lastLoeTomorrowWatchedText : undefined,
+            lastLoeTomorrowScheduleDate: typeof u.lastLoeTomorrowScheduleDate === 'string' ? u.lastLoeTomorrowScheduleDate : undefined,
             lastLoeTomorrowStatus: u.lastLoeTomorrowStatus === 'missing' || u.lastLoeTomorrowStatus === 'present'
                 ? u.lastLoeTomorrowStatus
                 : undefined,
@@ -257,10 +156,19 @@ function normalizeStateShape(input) {
 }
 function writeStateToDisk(state) {
     return __awaiter(this, void 0, void 0, function* () {
-        const normalized = normalizeStateShape(state);
-        const tmp = `${STATE_FILE_PATH}.tmp`;
-        yield promises_1.default.writeFile(tmp, JSON.stringify(normalized, null, 2), 'utf8');
-        yield promises_1.default.rename(tmp, STATE_FILE_PATH);
+        const content = JSON.stringify(normalizeStateShape(state), null, 2);
+        const tmp = `${STATE_FILE_PATH}.${process.pid}.tmp`;
+        try {
+            yield promises_1.default.writeFile(tmp, content, 'utf8');
+            if ((yield readStateFile()) !== lastSavedState) {
+                throw new Error(`Bot state changed on disk at ${STATE_FILE_PATH}. Restart the bot to reload it.`);
+            }
+            yield promises_1.default.rename(tmp, STATE_FILE_PATH);
+            lastSavedState = content;
+        }
+        finally {
+            yield promises_1.default.rm(tmp, { force: true });
+        }
     });
 }
 const token = (_c = process.env.BOT_TOKEN) === null || _c === void 0 ? void 0 : _c.trim();
@@ -282,150 +190,165 @@ function ensureUser(chatId) {
         return state.users[chatId];
     });
 }
-function checkOneChat(chatId_1, user_1) {
-    return __awaiter(this, arguments, void 0, function* (chatId, user, forceCheck = false) {
-        var _a, _b;
-        if (!user.watching && !forceCheck)
-            return;
-        if (!user.groups || user.groups.length === 0) {
-            user.lastLoeError = 'Не задано групи. Використайте /add_group, наприклад: /add_group 1.1, 3.2';
-            user.lastLoeCheckedAt = new Date().toISOString();
-            yield writeStateToDisk(state);
-            if (forceCheck) {
-                yield bot.telegram.sendMessage(chatId, user.lastLoeError);
+const scheduleFeed = (0, schedule_1.createScheduleFeed)();
+let lastAppliedSnapshot;
+const NO_GROUPS = 'Не задано групи. Використайте /add_group, наприклад: /add_group 1.1, 3.2';
+function selectedSchedule(day, groups) {
+    if (!day || !groups.some((group) => typeof day.groups[group] === 'string'))
+        return undefined;
+    return Object.assign(Object.assign({}, day), { groups: Object.fromEntries(groups.map((group) => { var _a; return [group, (_a = day.groups[group]) !== null && _a !== void 0 ? _a : '(Не знайдено в графіку)']; })) });
+}
+function scheduleLines(day) {
+    return Object.entries(day.groups).map(([group, text]) => `Група ${group}. ${text}`);
+}
+function saveTodayBaseline(user) {
+    var _a, _b;
+    const day = selectedSchedule((_a = scheduleFeed.read().snapshot) === null || _a === void 0 ? void 0 : _a.today, (_b = user.groups) !== null && _b !== void 0 ? _b : []);
+    const current = (day === null || day === void 0 ? void 0 : day.date) === (0, schedule_1.kyivDate)(Date.now()) ? day : undefined;
+    user.lastLoeWatchedText = current ? [...current.headers, ...scheduleLines(current)].join('\n') : undefined;
+    user.lastLoeScheduleDate = current === null || current === void 0 ? void 0 : current.date;
+}
+function scheduleMessage(title, day) {
+    const lines = scheduleLines(day).map((line) => line
+        .replace('Електроенергії немає', '\nЕлектроенергії немає:\n')
+        .replace(/,\s*/g, '\n'));
+    return [
+        `${title} (${day.date.split('-').reverse().join('.')})`,
+        ...day.headers,
+        '',
+        lines.join('\n\n'),
+        day.imageUrl ? `\nГрафік відключень: ${day.imageUrl}` : '',
+    ].join('\n').trim();
+}
+function scheduleChanged(day, previousText, previousDate) {
+    var _a, _b;
+    const previous = (0, schedule_1.parseScheduleText)(previousText);
+    const date = (_b = (0, schedule_1.dateFromHeading)((_a = previous.headers[0]) !== null && _a !== void 0 ? _a : '')) !== null && _b !== void 0 ? _b : previousDate;
+    return (date !== undefined && day.date !== date)
+        || Object.entries(day.groups).some(([group, text]) => previous.groups[group] !== text);
+}
+function previousScheduleDate(date, checkedAt, daysAhead = 0) {
+    const checkedTime = checkedAt ? Date.parse(checkedAt) : NaN;
+    return date !== null && date !== void 0 ? date : (Number.isFinite(checkedTime) ? (0, schedule_1.kyivDate)(checkedTime, daysAhead) : undefined);
+}
+function notifyChat(chatId, user, groups, snapshot) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const { fetchedAt } = snapshot;
+        const checkedAt = new Date(fetchedAt).toISOString();
+        const today = selectedSchedule(snapshot.today, groups);
+        const tomorrow = selectedSchedule(snapshot.tomorrow, groups);
+        const tomorrowDate = (0, schedule_1.kyivDate)(fetchedAt, 1);
+        if ((today === null || today === void 0 ? void 0 : today.date) === (0, schedule_1.kyivDate)(fetchedAt)) {
+            const previous = user.lastLoeWatchedText;
+            const previousDate = previousScheduleDate(user.lastLoeScheduleDate, user.lastLoeCheckedAt);
+            if (previous && scheduleChanged(today, previous, previousDate)) {
+                const title = previousDate && today.date !== previousDate
+                    ? '🔥 Графік відключень на сьогодні!'
+                    : '🔥 Графік відключень на сьогодні змінився!';
+                yield bot.telegram.sendMessage(chatId, scheduleMessage(title, today));
+                user.lastLoeNotifiedAt = checkedAt;
             }
-            return;
-        }
-        try {
-            const { today, tomorrow } = yield fetchLoePhotoGraficMenuItems();
-            user.lastLoeCheckedAt = new Date().toISOString();
+            user.lastLoeWatchedText = [...today.headers, ...scheduleLines(today)].join('\n');
+            user.lastLoeScheduleDate = today.date;
+            user.lastLoeCheckedAt = checkedAt;
             user.lastLoeError = undefined;
-            user.lastLoeTomorrowCheckedAt = user.lastLoeCheckedAt;
-            user.lastLoeTomorrowError = undefined;
-            if (today === null || today === void 0 ? void 0 : today.itemText) {
-                // ---- TODAY ----
-                const groupMap = parseGroupSchedulesFromText(today.itemText);
-                const selectedLines = user.groups
-                    .map((g) => { var _a; return (_a = groupMap[g]) !== null && _a !== void 0 ? _a : `Група ${g}. (Не знайдено в оновленні)`; });
-                // Keep the top 2 lines if present (usually "Графік ...", "Інформація станом ...")
-                const headerLines = normalizeMultilineText(today.itemText)
-                    .split('\n')
-                    .slice(0, 2)
-                    .filter((l) => l.length > 0);
-                const watchedText = [...headerLines, '', ...selectedLines].join('\n').trim();
-                const watchedGroupsText = selectedLines.join('\n').trim();
-                const prev = user.lastLoeWatchedText ? extractGroupLinesOnly(user.lastLoeWatchedText) : undefined;
-                const isNotifiedYesterday = user.lastLoeNotifiedAt ? new Date(user.lastLoeNotifiedAt).getDate() !== new Date().getDate() : false;
-                const formattedSelectedLines = selectedLines
-                    .map((line) => line + '\n')
-                    .map((line) => line.replace(/,/g, '\n'))
-                    .map((line) => line.replace('Електроенергії немає', '\nЕлектроенергії немає:\n'))
-                    .map((line) => line.replace(/ з /g, 'з '));
-                const watchedTextFormatted = [...headerLines, '', ...formattedSelectedLines].join('\n').trim();
-                if (forceCheck || (prev && (prev !== watchedGroupsText || isNotifiedYesterday))) {
-                    yield bot.telegram.sendMessage(chatId, [
-                        forceCheck ? '🔥 Оновлення перевірено!' : isNotifiedYesterday ? '🔥 Графік відключень на сьогодні!' : '🔥 Графік відключень на сьогодні змінився!',
-                        ' ',
-                        watchedTextFormatted || '(Не вдалося прочитати текст)',
-                        '',
-                        today.imageUrl ? `\n${prev ? 'Графік відключень на сьогодні' : 'Графік відключень'}: ${today.imageUrl}` : '',
-                    ]
-                        .filter(Boolean)
-                        .join('\n'));
-                    user.lastLoeWatchedText = watchedText;
-                    user.lastLoeNotifiedAt = new Date().toISOString();
-                    yield writeStateToDisk(state);
-                }
-                else if (!prev) {
-                    user.lastLoeWatchedText = watchedText;
-                }
+        }
+        if ((tomorrow === null || tomorrow === void 0 ? void 0 : tomorrow.date) === tomorrowDate) {
+            const previous = user.lastLoeTomorrowWatchedText;
+            const previousDate = previousScheduleDate(user.lastLoeTomorrowScheduleDate, user.lastLoeTomorrowCheckedAt, 1);
+            const appeared = !previous || (previousDate !== undefined && tomorrow.date !== previousDate);
+            if (appeared || scheduleChanged(tomorrow, previous, previousDate)) {
+                const title = appeared ? '🗓️ Зʼявився графік відключень на завтра!' : '🗓️ Графік відключень на завтра змінився!';
+                yield bot.telegram.sendMessage(chatId, scheduleMessage(title, tomorrow));
+                user.lastLoeTomorrowNotifiedAt = checkedAt;
             }
-            const tomorrowGroupMap = parseGroupSchedulesFromText((_a = tomorrow === null || tomorrow === void 0 ? void 0 : tomorrow.itemText) !== null && _a !== void 0 ? _a : '');
-            if (tomorrow && user.groups.some((g) => Boolean(tomorrowGroupMap[g]))) {
-                const tomorrowSelectedLines = user.groups.map((g) => { var _a; return (_a = tomorrowGroupMap[g]) !== null && _a !== void 0 ? _a : `Група ${g}. (Не знайдено в графіку на завтра)`; });
-                const tomorrowHeaderLines = normalizeMultilineText(tomorrow.itemText)
-                    .split('\n')
-                    .slice(0, 2)
-                    .filter((l) => l.length > 0);
-                const previousTomorrowTitle = (_b = user.lastLoeTomorrowWatchedText) === null || _b === void 0 ? void 0 : _b.split('\n')[0];
-                const tomorrowWatchedText = [...tomorrowHeaderLines, '', ...tomorrowSelectedLines].join('\n').trim();
-                const tomorrowWatchedGroupsText = tomorrowSelectedLines.join('\n').trim();
-                const tomorrowPrevGroupsOnly = user.lastLoeTomorrowWatchedText
-                    ? extractGroupLinesOnly(user.lastLoeTomorrowWatchedText)
-                    : undefined;
-                const appeared = user.lastLoeTomorrowStatus !== 'present';
-                const formattedTomorrowSelectedLines = tomorrowSelectedLines
-                    .map((line) => line + '\n')
-                    .map((line) => line.replace(/,/g, '\n'))
-                    .map((line) => line.replace('Електроенергії немає', '\nЕлектроенергії немає:\n'))
-                    .map((line) => line.replace(/ з /g, 'з '));
-                const tomorrowWatchedTextFormatted = [...tomorrowHeaderLines, '', ...formattedTomorrowSelectedLines].join('\n').trim();
-                if (appeared || forceCheck || tomorrowPrevGroupsOnly !== tomorrowWatchedGroupsText || previousTomorrowTitle !== tomorrowHeaderLines[0]) {
-                    yield bot.telegram.sendMessage(chatId, [
-                        appeared || forceCheck ? '🗓️ Зʼявився графік відключень на завтра!' : '🗓️ Графік відключень на завтра змінився!',
-                        ' ',
-                        tomorrowWatchedTextFormatted || '(Не вдалося прочитати текст)',
-                        '',
-                        tomorrow.imageUrl ? `\nГрафік (завтра): ${tomorrow.imageUrl}` : '',
-                    ]
-                        .filter(Boolean)
-                        .join('\n'));
-                    user.lastLoeTomorrowStatus = 'present';
-                    user.lastLoeTomorrowWatchedText = tomorrowWatchedText;
-                    user.lastLoeTomorrowNotifiedAt = new Date().toISOString();
+            user.lastLoeTomorrowWatchedText = [...tomorrow.headers, ...scheduleLines(tomorrow)].join('\n');
+            user.lastLoeTomorrowScheduleDate = tomorrow.date;
+            user.lastLoeTomorrowStatus = 'present';
+        }
+        else if (!snapshot.tomorrow || snapshot.tomorrow.date === tomorrowDate) {
+            user.lastLoeTomorrowStatus = 'missing';
+            // Keep the last published version so a temporary disappearance does not cause another alert.
+        }
+        user.lastLoeTomorrowCheckedAt = checkedAt;
+        user.lastLoeTomorrowError = undefined;
+    });
+}
+function refreshSchedules(trigger) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const result = yield scheduleFeed.refresh(trigger);
+        const snapshot = result.snapshot;
+        if (!snapshot || result.error || snapshot === lastAppliedSnapshot)
+            return result;
+        yield runStateOp(() => __awaiter(this, void 0, void 0, function* () {
+            var _a;
+            if (snapshot === lastAppliedSnapshot)
+                return;
+            let deliveryFailed = false;
+            for (const [chatId, user] of Object.entries(state.users)) {
+                if (!user.watching || !((_a = user.groups) === null || _a === void 0 ? void 0 : _a.length))
+                    continue;
+                try {
+                    yield notifyChat(chatId, user, user.groups, snapshot);
                 }
-            }
-            else {
-                user.lastLoeTomorrowStatus = 'missing';
-                user.lastLoeTomorrowWatchedText = undefined;
-                if (forceCheck && !(today === null || today === void 0 ? void 0 : today.itemText)) {
-                    yield bot.telegram.sendMessage(chatId, 'Графіки відключень на сьогодні й завтра наразі недоступні.');
+                catch (error) {
+                    deliveryFailed = true;
+                    console.error('Schedule notification failed:', error instanceof Error ? error.message : String(error));
                 }
             }
             yield writeStateToDisk(state);
+            if (!deliveryFailed)
+                lastAppliedSnapshot = snapshot;
+        }));
+        return result;
+    });
+}
+function showSchedule(ctx_1) {
+    return __awaiter(this, arguments, void 0, function* (ctx, result = scheduleFeed.read(), nextFetchAt) {
+        var _a;
+        const groups = (_a = state.users[String(ctx.chat.id)]) === null || _a === void 0 ? void 0 : _a.groups;
+        if (!(groups === null || groups === void 0 ? void 0 : groups.length)) {
+            yield ctx.reply(NO_GROUPS);
+            return;
         }
-        catch (err) {
-            user.lastLoeCheckedAt = new Date().toISOString();
-            user.lastLoeError = (err === null || err === void 0 ? void 0 : err.message) ? String(err.message) : 'Невідома помилка під час перевірки графіка';
-            yield writeStateToDisk(state);
-            if (forceCheck) {
-                yield bot.telegram.sendMessage(chatId, `❌ Помилка: ${user.lastLoeError}`);
-            }
+        const snapshot = result.snapshot;
+        const status = [
+            snapshot ? `Графік отримано: ${schedule_1.kyivTimeFormatter.format(snapshot.fetchedAt)} (за Києвом).` : '',
+            result.error ? 'Не вдалося оновити графік.' : '',
+            nextFetchAt ? `Наступний запит до API можливий з ${schedule_1.kyivTimeFormatter.format(nextFetchAt)} (за Києвом).` : '',
+        ].filter(Boolean);
+        const today = selectedSchedule(snapshot === null || snapshot === void 0 ? void 0 : snapshot.today, groups);
+        const tomorrow = selectedSchedule(snapshot === null || snapshot === void 0 ? void 0 : snapshot.tomorrow, groups);
+        if (!today && !tomorrow) {
+            status.push('Для вибраних груп графік наразі недоступний.');
+            if (!nextFetchAt)
+                status.push('Скористайтеся /check, щоб перевірити оновлення.');
         }
+        yield ctx.reply(status.join('\n'));
+        if (today)
+            yield ctx.reply(scheduleMessage('🔥 Графік відключень', today));
+        if (tomorrow)
+            yield ctx.reply(scheduleMessage('🗓️ Графік відключень', tomorrow));
+    });
+}
+function checkCommand(ctx) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a, _b;
+        if (!((_b = (_a = state.users[String(ctx.chat.id)]) === null || _a === void 0 ? void 0 : _a.groups) === null || _b === void 0 ? void 0 : _b.length)) {
+            yield ctx.reply(NO_GROUPS);
+            return;
+        }
+        const result = yield refreshSchedules('manual');
+        yield showSchedule(ctx, result, scheduleFeed.nextFetchAt());
     });
 }
 function checkAllWatchingChats() {
     return __awaiter(this, void 0, void 0, function* () {
-        const entries = Object.entries(state.users);
-        for (const [chatId, user] of entries) {
-            yield checkOneChat(chatId, user);
-        }
-    });
-}
-function checkLikeCheckCommand(ctx) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const chatId = String(ctx.chat.id);
-        yield ctx.reply('Перевіряю…');
-        yield runStateOp(() => __awaiter(this, void 0, void 0, function* () {
-            const user = yield ensureUser(chatId);
-            yield checkOneChat(chatId, user, true);
-        }));
-    });
-}
-function watchLikeWatchCommand(ctx) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const chatId = String(ctx.chat.id);
-        yield runStateOp(() => __awaiter(this, void 0, void 0, function* () {
-            const user = yield ensureUser(chatId);
-            user.watching = true;
-            yield writeStateToDisk(state);
-        }));
-        yield ctx.reply('Перевірка відключень електроенергії увімкнена ✅\nЯ буду сповіщати вас, якщо графік відключень електроенергії зміниться.');
-        // Do an immediate baseline check (no notification on first snapshot)
-        yield runStateOp(() => __awaiter(this, void 0, void 0, function* () {
-            const user = yield ensureUser(chatId);
-            yield checkOneChat(chatId, user);
-        }));
+        const chatCount = Object.values(state.users).filter((user) => { var _a; return user.watching && ((_a = user.groups) === null || _a === void 0 ? void 0 : _a.length); }).length;
+        if (!chatCount)
+            return;
+        console.info(`[LOE] Scheduled check for ${chatCount} subscribed chats`);
+        yield refreshSchedules('scheduled');
     });
 }
 function promptForNextStep(ctx, step) {
@@ -464,7 +387,6 @@ bot.start((ctx) => __awaiter(void 0, void 0, void 0, function* () {
     }));
     yield ctx.reply('Привіт!\nЯ чат-бот який вміє відстежувати графік погодинних відключень для вибраних груп та сповіщати, коли він зміниться.\nДодай групи відключень електроенергії та я буду сповіщати тебе, коли вони зміняться.');
     yield promptForNextStep(ctx, 'groups');
-    yield checkLikeCheckCommand(ctx);
 }));
 bot.command('groups_list', (ctx) => __awaiter(void 0, void 0, void 0, function* () {
     var _a;
@@ -504,13 +426,13 @@ function addGroupCommand(ctx) {
             const current = (_a = user.groups) !== null && _a !== void 0 ? _a : [];
             user.groups = [...current, ...toAdd].filter((g, idx, arr) => arr.indexOf(g) === idx);
             user.pendingStep = undefined;
-            user.lastLoeWatchedText = undefined;
+            saveTodayBaseline(user);
             user.lastLoeError = undefined;
             yield writeStateToDisk(state);
         }));
         const groups = (_d = (_c = state.users[chatId]) === null || _c === void 0 ? void 0 : _c.groups) !== null && _d !== void 0 ? _d : [];
         yield ctx.reply(`Додано ✅\nВи відстежуєте такі групи відключень електроенергії: ${groups.join(', ')}`);
-        yield checkLikeCheckCommand(ctx);
+        yield showSchedule(ctx);
     });
 }
 bot.command('add_group', addGroupCommand);
@@ -543,20 +465,21 @@ function removeGroupCommand(ctx) {
             const current = (_a = user.groups) !== null && _a !== void 0 ? _a : [];
             user.groups = current.filter((g) => !toRemove.includes(g));
             user.pendingStep = undefined;
-            user.lastLoeWatchedText = undefined;
+            saveTodayBaseline(user);
             user.lastLoeError = undefined;
             yield writeStateToDisk(state);
         }));
         const groups = (_d = (_c = state.users[chatId]) === null || _c === void 0 ? void 0 : _c.groups) !== null && _d !== void 0 ? _d : [];
         yield ctx.reply(groups.length ? `Видалено ✅\nТепер групи: ${groups.join(', ')}` : 'Видалено ✅\nГрупи порожні. Використайте /add_group');
-        yield checkLikeCheckCommand(ctx);
+        yield showSchedule(ctx);
     });
 }
 bot.command('remove_group', removeGroupCommand);
 // Backward-compatible alias
 bot.command('groups_remove', removeGroupCommand);
-bot.command('check', (ctx) => __awaiter(void 0, void 0, void 0, function* () {
-    yield checkLikeCheckCommand(ctx);
+bot.command('check', checkCommand);
+bot.command('schedule', (ctx) => __awaiter(void 0, void 0, void 0, function* () {
+    yield showSchedule(ctx);
 }));
 bot.on('text', (ctx) => __awaiter(void 0, void 0, void 0, function* () {
     var _a, _b, _c, _d, _e;
@@ -582,7 +505,7 @@ bot.on('text', (ctx) => __awaiter(void 0, void 0, void 0, function* () {
                 u.groups = groups;
                 u.pendingStep = undefined;
                 u.watching = true; // enable by default once groups are set
-                u.lastLoeWatchedText = undefined; // reset snapshot on change
+                saveTodayBaseline(u);
                 u.lastLoeError = undefined;
                 yield writeStateToDisk(state);
             }));
@@ -592,11 +515,7 @@ bot.on('text', (ctx) => __awaiter(void 0, void 0, void 0, function* () {
                 '',
                 'Сповіщення: УВІМК.',
             ].join('\n'));
-            // Baseline + immediate forced check to show current info
-            yield runStateOp(() => __awaiter(void 0, void 0, void 0, function* () {
-                const u = yield ensureUser(chatId);
-                yield checkOneChat(chatId, u, true);
-            }));
+            yield showSchedule(ctx);
             return;
         }
         if (pending === 'groups_add') {
@@ -612,13 +531,13 @@ bot.on('text', (ctx) => __awaiter(void 0, void 0, void 0, function* () {
                 const current = (_a = u.groups) !== null && _a !== void 0 ? _a : [];
                 u.groups = [...current, ...toAdd].filter((g, idx, arr) => arr.indexOf(g) === idx);
                 u.pendingStep = undefined;
-                u.lastLoeWatchedText = undefined;
+                saveTodayBaseline(u);
                 u.lastLoeError = undefined;
                 yield writeStateToDisk(state);
             }));
             const groups = (_c = (_b = state.users[chatId]) === null || _b === void 0 ? void 0 : _b.groups) !== null && _c !== void 0 ? _c : [];
             yield ctx.reply(`Додано ✅\nТепер групи: ${groups.join(', ')}`);
-            yield checkLikeCheckCommand(ctx);
+            yield showSchedule(ctx);
             return;
         }
         if (pending === 'groups_remove') {
@@ -634,13 +553,13 @@ bot.on('text', (ctx) => __awaiter(void 0, void 0, void 0, function* () {
                 const current = (_a = u.groups) !== null && _a !== void 0 ? _a : [];
                 u.groups = current.filter((g) => !toRemove.includes(g));
                 u.pendingStep = undefined;
-                u.lastLoeWatchedText = undefined;
+                saveTodayBaseline(u);
                 u.lastLoeError = undefined;
                 yield writeStateToDisk(state);
             }));
             const groups = (_e = (_d = state.users[chatId]) === null || _d === void 0 ? void 0 : _d.groups) !== null && _e !== void 0 ? _e : [];
             yield ctx.reply(groups.length ? `Видалено ✅\nТепер групи: ${groups.join(', ')}` : 'Видалено ✅\nГрупи порожні. Використайте /add_group');
-            yield checkLikeCheckCommand(ctx);
+            yield showSchedule(ctx);
             return;
         }
     }
@@ -649,9 +568,7 @@ function main() {
     return __awaiter(this, void 0, void 0, function* () {
         var _a, _b, _c, _d;
         state = yield readStateFromDisk();
-        // Ensure shape
-        if (!state.users)
-            state.users = {};
+        console.info(`[State] Loaded ${Object.keys(state.users).length} chat records from ${STATE_FILE_PATH}`);
         // Make commands show up in Telegram UI ("/" menu)
         try {
             yield bot.telegram.setMyCommands([
@@ -659,7 +576,8 @@ function main() {
                 { command: 'groups_list', description: 'Показати вибрані групи' },
                 { command: 'add_group', description: 'Додати групи' },
                 { command: 'remove_group', description: 'Видалити групи' },
-                { command: 'check', description: 'Перевірити зараз' },
+                { command: 'schedule', description: 'Показати збережений графік' },
+                { command: 'check', description: 'Запросити оновлення графіка' },
             ]);
         }
         catch (_e) {
@@ -677,19 +595,14 @@ function main() {
             const delayMs = nextCheckDelayMs();
             console.log(`Next scheduled check in ${delayMs}ms (${formatInterval(delayMs)})`);
             setTimeout(() => {
-                console.log('Checking all watching chats...', new Date().toISOString());
-                runStateOp(() => __awaiter(this, void 0, void 0, function* () {
-                    yield checkAllWatchingChats();
-                }))
-                    .catch(() => undefined)
+                checkAllWatchingChats()
+                    .catch((error) => console.error('Scheduled check failed:', error))
                     .finally(() => scheduleNext());
             }, delayMs);
         };
         setTimeout(() => {
-            runStateOp(() => __awaiter(this, void 0, void 0, function* () {
-                yield checkAllWatchingChats();
-            }))
-                .catch(() => undefined)
+            checkAllWatchingChats()
+                .catch((error) => console.error('Initial check failed:', error))
                 .finally(() => scheduleNext());
         }, 2000);
         // If this bot was previously configured with a webhook, long-polling will fail.
