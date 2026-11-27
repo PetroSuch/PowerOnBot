@@ -4,25 +4,30 @@ PowerOnBot is a Telegram bot that monitors Lvivoblenergo's scheduled power outag
 
 ## Using the bot
 
-Send `/start` in Telegram and reply with your outage groups, for example `1.1; 3.2`. The bot saves the selection, enables alerts, and checks the current schedules. It supports groups `1.1` through `6.2`, with two groups per number, and accepts both `1.1` and `1,1` as input.
+Send `/start` in Telegram and reply with your outage groups, for example `1.1; 3.2`. The bot saves the selection, enables alerts, and shows the saved schedule if one is available. Use `/check` to request an update. It supports groups `1.1` through `6.2`, with two groups per number, and accepts both `1.1` and `1,1` as input.
 
 | Command | What it does |
 | --- | --- |
 | `/start` | Prompts you to choose or replace the chat's groups and enables alerts after you save them. |
 | `/groups_list` | Shows the chat's selected groups. |
-| `/add_group 1.1; 3.2` | Adds groups and checks the current schedules. In a new chat, finish `/start` to enable automatic alerts. |
+| `/add_group 1.1; 3.2` | Adds groups and shows any saved schedules for them. In a new chat, finish `/start` to enable automatic alerts. |
 | `/remove_group 1.1` | Removes groups. Remove all groups to stop receiving alerts. |
-| `/check` | Fetches the latest available schedules for the chat's selected groups. |
+| `/schedule` | Shows the latest saved schedules for the chat's groups without making an upstream request. |
+| `/check` | Requests a refresh and shows the latest available schedules. Each Telegram user can request a refresh once every 10 minutes. The reply includes the schedule's last update time when available and the next manual refresh time. |
 
 Send `/add_group` or `/remove_group` without arguments to have the bot prompt you for the group IDs.
 
 ## How it works
 
 1. **Receive Telegram updates.** The TypeScript app uses Telegraf to receive commands and replies through long polling. Run one polling instance per bot token.
-2. **Fetch schedules.** The first automatic check is scheduled about two seconds after startup. Each pass checks subscribed chats with selected groups and fetches the Lvivoblenergo menu for each chat. After a pass finishes, the bot waits a random 15–20 minutes by default. `/check` starts an on-demand check.
-3. **Read the selected groups.** The bot looks for the `Today` and `Tomorrow` menu items. Cheerio extracts text from the mobile HTML when available and falls back to the regular HTML when the mobile field is empty. The bot matches group IDs in that text against the chat's selection.
-4. **Send updates.** A first automatic check establishes a baseline for today's schedule. Later checks compare the selected group lines and send a Telegram message when they change. The bot also sends tomorrow's schedule when it first finds a matching group, or when the selected lines or schedule title change. An on-demand check returns the available schedule without waiting for a change.
-5. **Save state.** The bot loads and updates `label-state.json` in the project root. This file stores Telegram chat IDs, group selections, alert settings, and schedule snapshots across restarts.
+2. **Fetch schedules.** The first automatic check is scheduled about two seconds after startup. It checks for subscribed chats, then refreshes one shared snapshot. The default delay between scheduled passes is a random 15–20 minutes. Scheduled passes and manual refreshes share any in-flight request and wait at least 10 minutes after a request completes before contacting Lvivoblenergo again.
+3. **Read the selected groups.** The bot looks for the `Today` and `Tomorrow` menu items. Cheerio extracts text from the mobile HTML and falls back to the regular HTML if it cannot read the mobile schedule. The bot parses group IDs once per fetch and matches them against each chat's selection.
+4. **Send updates.** The bot establishes a baseline for today's schedule, compares selected group schedules by Kyiv calendar date, and announces tomorrow's schedule when it first becomes available for those groups. A failed fetch or malformed response leaves the last successful snapshot available for viewing.
+5. **Save state.** The bot loads and updates `label-state.json` in the project root. It stores Telegram chat IDs, group selections, alert settings, notification baselines, and manual cooldowns. The shared feed snapshot and upstream cooldown live in memory for the running process.
+
+The startup log reports how many chat records were loaded. Invalid or unreadable state stops startup. If you update the file while the bot is running, restart the bot to load the changes.
+
+To verify upstream traffic, look for `[LOE] Upstream fetch #… started` in the server logs. Each of those lines represents one request, regardless of the subscriber count. Checks that join a running fetch or use the cache have separate log lines. Fetch numbers restart with the process.
 
 ## Run locally
 
@@ -39,7 +44,7 @@ npm ci
 npm start
 ```
 
-`npm start` builds the TypeScript and runs the compiled bot with Nodemon. Use `npm run dev` to recompile TypeScript as you edit. Restart the bot after updating `.env`.
+`npm start` builds the TypeScript and runs the compiled bot with Nodemon. Use `npm run dev` to recompile TypeScript as you edit, or `npm test` to run the mocked regression tests. Restart the bot after updating `.env`.
 
 You can also supply `BOT_TOKEN` through your shell, which takes precedence over `.env`.
 
