@@ -1,0 +1,75 @@
+<main>
+  <header>
+    <p class="brand">PowerOn</p>
+    <h1>Графік відключень</h1>
+  </header>
+
+  <section aria-labelledby="groups">
+    <h2 id="groups">Ваші групи</h2>
+    <div class="group-grid">
+      @for (group of possibleGroups; track group) {
+        <button type="button" [attr.aria-pressed]="groups().includes(group)"
+          [disabled]="changingPush()" (click)="toggleGroup(group)">{{ group }}</button>
+      }
+    </div>
+  </section>
+
+  <section aria-labelledby="schedule">
+    <div class="section-heading">
+      <h2 id="schedule">Розклад</h2>
+      <button class="secondary" type="button" [disabled]="loading()" (click)="load(true)">Оновити</button>
+    </div>
+    <div class="metadata" aria-live="polite">
+      @if (updated()) { <p>Отримано {{ updated() }} за Києвом</p> }
+      @if (nextFetch()) { <p>Наступний запит до джерела з {{ nextFetch() }}</p> }
+      @if (loading()) { <p>Завантаження графіка…</p> }
+      @if (scheduleError()) { <p>{{ scheduleError() }}</p> }
+      @if (response()?.refreshFailed) { <p>Джерело графіків тимчасово недоступне.</p> }
+    </div>
+    @if (!groups().length) {
+      <p>Оберіть хоча б одну групу, щоб переглянути її графік.</p>
+    } @else {
+      @for (entry of days(); track entry.key) {
+        <article>
+          <h3>{{ entry.label }} @if (entry.day) { <time [attr.datetime]="entry.day.date">{{ entry.day.date.split('-').reverse().join('.') }}</time> }</h3>
+          @if (entry.day; as day) {
+            <dl>
+              @for (group of groups(); track group) {
+                <div>
+                  <dt>{{ group }}</dt>
+                  <dd>{{ day.groups[group] ?? 'Графік для цієї групи ще недоступний.' }}</dd>
+                </div>
+              }
+            </dl>
+            @if (day.imageUrl) { <a [href]="day.imageUrl" target="_blank" rel="noopener">Оригінал графіка</a> }
+          } @else {
+            <p>Графік ще недоступний.</p>
+          }
+        </article>
+      }
+    }
+  </section>
+
+  <section aria-labelledby="notifications">
+    <div class="section-heading">
+      <h2 id="notifications">Сповіщення</h2>
+      @if (publicKey() && pushAvailable) {
+        <button class="secondary" type="button" [disabled]="changingPush() || !groups().length" (click)="togglePush()">
+          {{ device() ? 'Вимкнути' : 'Увімкнути' }}
+        </button>
+      }
+    </div>
+    @if (pushEnabled()) {
+      <p>Увімкнено для груп {{ groups().join(', ') }}.</p>
+    } @else if (!pushAvailable && isAppleMobile) {
+      <p>На iPhone додайте PowerOn на домашній екран і відкрийте його звідти.</p>
+    } @else if (!pushAvailable) {
+      <p>У цьому режимі сповіщення недоступні.</p>
+    } @else if (!publicKey()) {
+      <p>Сповіщення поки недоступні.</p>
+    } @else if (!groups().length) {
+      <p>Оберіть групи для сповіщень.</p>
+    }
+    @if (pushMessage()) { <p role="status">{{ pushMessage() }}</p> }
+  </section>
+</main>
