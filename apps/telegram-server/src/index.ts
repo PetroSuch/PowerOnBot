@@ -1,4 +1,5 @@
 import { Telegraf, type Context } from 'telegraf';
+import { POSSIBLE_GROUPS, type ManagedSubscription, type ScheduleDay, type ScheduleResponse, type ScheduleSnapshot } from '@poweron/shared';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -9,10 +10,10 @@ import {
   kyivTimeFormatter,
   normalizeGroupId,
   parseScheduleText,
-  POSSIBLE_GROUPS,
-  type ScheduleDay,
-  type ScheduleSnapshot,
 } from './schedule';
+import { startPwaServer } from './pwa';
+import { openTelegramState } from './telegram-state';
+import { openConfiguredAccounts, type Accounts } from './accounts';
 
 type IsoDateString = string;
 
@@ -43,11 +44,14 @@ type BotState = {
   users: Record<string, UserState>;
 };
 
-const STATE_FILE_PATH = path.join(process.cwd(), 'label-state.json');
-try {
-  process.loadEnvFile(path.join(process.cwd(), '.env'));
-} catch (err) {
-  if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+const REPO_ROOT = path.resolve(__dirname, '../../..');
+const STATE_FILE_PATH = path.join(REPO_ROOT, 'label-state.json');
+for (const file of ['.env.local', '.env']) {
+  try {
+    process.loadEnvFile(path.join(REPO_ROOT, file));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
 }
 
 // Scheduling:
@@ -208,6 +212,16 @@ async function writeStateToDisk(state: BotState): Promise<void> {
   }
 }
 
+let telegramStateStore: Awaited<ReturnType<typeof openTelegramState<BotState>>> | undefined;
+
+async function saveState(state: BotState): Promise<void> {
+  if (telegramStateStore) {
+    await telegramStateStore.save(normalizeStateShape(state));
+  } else {
+    await writeStateToDisk(state);
+  }
+}
+
 const token = process.env.BOT_TOKEN?.trim();
 if (!token) {
   throw new Error('Вкажіть BOT_TOKEN у файлі .env поруч із package.json або в змінних середовища.');
@@ -233,6 +247,23 @@ async function ensureUser(chatId: string): Promise<UserState> {
 
 const scheduleFeed = createScheduleFeed();
 let lastAppliedSnapshot: ScheduleSnapshot | undefined;
+let pwaServer: Awaited<ReturnType<typeof startPwaServer>> | undefined;
+let accounts: Accounts | undefined;
+
+async function chatGroups(chatId: string): Promise<string[]> {
+  return (await accounts?.linkedChat(chatId))?.groups ?? state.users[chatId]?.groups ?? [];
+}
+
+async function setChatGroups(chatId: string, user: UserState, groups: string[]) {
+  const linked = await accounts?.linkedChat(chatId);
+  if (accounts && linked) {
+    await accounts.replaceGroups(linked.user_id, groups);
+    user.groups = undefined;
+  } else {
+    user.groups = groups;
+  }
+  saveTodayBaseline(user, groups);
+}
 type ChatContext = Context & { chat: NonNullable<Context['chat']> };
 const NO_GROUPS = 'Не задано групи. Використайте /add_group, наприклад: /add_group 1.1, 3.2';
 
@@ -248,8 +279,8 @@ function scheduleLines(day: ScheduleDay): string[] {
   return Object.entries(day.groups).map(([group, text]) => `Група ${group}. ${text}`);
 }
 
-function saveTodayBaseline(user: UserState) {
-  const day = selectedSchedule(scheduleFeed.read().snapshot?.today, user.groups ?? []);
+function saveTodayBaseline(user: UserState, groups: string[]) {
+  const day = selectedSchedule(scheduleFeed.read().snapshot?.today, groups);
   const current = day?.date === kyivDate(Date.now()) ? day : undefined;
   user.lastLoeWatchedText = current ? [...current.headers, ...scheduleLines(current)].join('\n') : undefined;
   user.lastLoeScheduleDate = current?.date;
@@ -325,25 +356,59 @@ async function notifyChat(chatId: string, user: UserState, groups: string[], sna
 
 async function refreshSchedules(trigger: 'scheduled' | 'manual') {
   const result = await scheduleFeed.refresh(trigger);
+  await applySchedule(result);
+  return result;
+}
+
+async function applySchedule(result: ReturnType<typeof scheduleFeed.read>) {
   const snapshot = result.snapshot;
-  if (!snapshot || result.error || snapshot === lastAppliedSnapshot) return result;
+  if (!snapshot || result.error || snapshot === lastAppliedSnapshot) return;
 
   await runStateOp(async () => {
     if (snapshot === lastAppliedSnapshot) return;
+    await telegramStateStore?.saveSchedule(snapshot, scheduleFeed.nextFetchAt());
     let deliveryFailed = false;
+    let processed = false;
+    const linkedGroups = new Map((await accounts?.linkedChats() ?? []).map((chat) => [chat.chat_id, chat.groups]));
     for (const [chatId, user] of Object.entries(state.users)) {
-      if (!user.watching || !user.groups?.length) continue;
+      const groups = linkedGroups.get(chatId) ?? user.groups;
+      if (!user.watching || !groups?.length) continue;
+      processed = true;
       try {
-        await notifyChat(chatId, user, user.groups, snapshot);
+        await notifyChat(chatId, user, groups, snapshot);
       } catch (error) {
         deliveryFailed = true;
         console.error('Schedule notification failed:', error instanceof Error ? error.message : String(error));
       }
     }
-    await writeStateToDisk(state);
+    if (processed) await saveState(state);
+    await pwaServer?.push?.publish(snapshot);
     if (!deliveryFailed) lastAppliedSnapshot = snapshot;
   });
-  return result;
+}
+
+async function listTelegramSubscriptions(): Promise<ManagedSubscription[]> {
+  const linkedGroups = new Map((await accounts?.linkedChats() ?? []).map((chat) => [chat.chat_id, chat.groups]));
+  return Object.entries(state.users).map(([id, chat]) => ({
+    id, channel: 'telegram', groups: linkedGroups.get(id) ?? chat.groups ?? [], watching: chat.watching,
+  }));
+}
+
+function updateTelegramSubscription(id: string, groups: string[], watching: boolean) {
+  return runStateOp(async () => {
+    const previous = state.users[id];
+    if (!previous) return false;
+    const updated = { ...previous, groups, watching, pendingStep: undefined };
+    await setChatGroups(id, updated, groups);
+    state.users[id] = updated;
+    try {
+      await saveState(state);
+    } catch (error) {
+      state.users[id] = previous;
+      throw error;
+    }
+    return true;
+  });
 }
 
 async function showSchedule(
@@ -351,7 +416,7 @@ async function showSchedule(
   result: ReturnType<typeof scheduleFeed.read> = scheduleFeed.read(),
   nextFetchAt?: number,
 ): Promise<void> {
-  const groups = state.users[String(ctx.chat.id)]?.groups;
+  const groups = await chatGroups(String(ctx.chat.id));
   if (!groups?.length) {
     await ctx.reply(NO_GROUPS);
     return;
@@ -375,7 +440,7 @@ async function showSchedule(
 }
 
 async function checkCommand(ctx: ChatContext): Promise<void> {
-  if (!state.users[String(ctx.chat.id)]?.groups?.length) {
+  if (!(await chatGroups(String(ctx.chat.id))).length) {
     await ctx.reply(NO_GROUPS);
     return;
   }
@@ -385,8 +450,8 @@ async function checkCommand(ctx: ChatContext): Promise<void> {
 }
 
 async function checkAllWatchingChats(): Promise<void> {
-  const chatCount = Object.values(state.users).filter((user) => user.watching && user.groups?.length).length;
-  if (!chatCount) return;
+  const chatCount = Object.values(state.users).filter((user) => user.watching && (accounts || user.groups?.length)).length;
+  if (!chatCount && !pwaServer) return;
   console.info(`[LOE] Scheduled check for ${chatCount} subscribed chats`);
   await refreshSchedules('scheduled');
 }
@@ -414,7 +479,7 @@ async function promptForNextStep(ctx: any, step: UserState['pendingStep']): Prom
     return;
   }
   if (step === 'groups_remove') {
-    const currentGroups = state.users[String(ctx.chat.id)]?.groups ?? [];
+    const currentGroups = await chatGroups(String(ctx.chat.id));
     await ctx.reply(
       ['Які групи видалити?', '', 'Наразі вибрані групи: ' + currentGroups.join(', '), '', 'Приклад: 1,1; 3.2'].join('\n'),
     );
@@ -424,10 +489,17 @@ async function promptForNextStep(ctx: any, step: UserState['pendingStep']): Prom
 
 bot.start(async (ctx) => {
   const chatId = String(ctx.chat.id);
+  if (ctx.startPayload?.startsWith('link_')) {
+    const linked = accounts && ctx.chat.type === 'private' && ctx.from
+      && await accounts.receiveLink(ctx.startPayload.slice(5), String(ctx.from.id), chatId);
+    await ctx.reply(linked ? 'Поверніться у PowerOn і підтвердьте прив’язку Telegram.'
+      : 'Посилання на прив’язку недійсне або вже використане.');
+    return;
+  }
   await runStateOp(async () => {
     const user = await ensureUser(chatId);
     user.pendingStep = 'groups';
-    await writeStateToDisk(state);
+    await saveState(state);
   });
   await ctx.reply('Привіт!\nЯ чат-бот який вміє відстежувати графік погодинних відключень для вибраних груп та сповіщати, коли він зміниться.\nДодай групи відключень електроенергії та я буду сповіщати тебе, коли вони зміняться.');
   await promptForNextStep(ctx, 'groups');
@@ -435,8 +507,7 @@ bot.start(async (ctx) => {
 
 bot.command('groups_list', async (ctx) => {
   const chatId = String(ctx.chat.id);
-  const user = state.users[chatId];
-  const groups = user?.groups ?? [];
+  const groups = await chatGroups(chatId);
   if (groups.length === 0) {
     await ctx.reply('Групи не задані. Використайте /add_group, наприклад: /add_group 1.1, 3.2');
     return;
@@ -453,7 +524,7 @@ async function addGroupCommand(ctx: any): Promise<void> {
     await runStateOp(async () => {
       const user = await ensureUser(chatId);
       user.pendingStep = 'groups_add';
-      await writeStateToDisk(state);
+      await saveState(state);
     });
     await promptForNextStep(ctx, 'groups_add');
     return;
@@ -469,15 +540,13 @@ async function addGroupCommand(ctx: any): Promise<void> {
 
   await runStateOp(async () => {
     const user = await ensureUser(chatId);
-    const current = user.groups ?? [];
-    user.groups = [...current, ...toAdd].filter((g, idx, arr) => arr.indexOf(g) === idx);
+    await setChatGroups(chatId, user, [...new Set([...(await chatGroups(chatId)), ...toAdd])]);
     user.pendingStep = undefined;
-    saveTodayBaseline(user);
     user.lastLoeError = undefined;
-    await writeStateToDisk(state);
+    await saveState(state);
   });
 
-  const groups = state.users[chatId]?.groups ?? [];
+  const groups = await chatGroups(chatId);
   await ctx.reply(`Додано ✅\nВи відстежуєте такі групи відключень електроенергії: ${groups.join(', ')}`);
   await showSchedule(ctx);
 }
@@ -495,7 +564,7 @@ async function removeGroupCommand(ctx: any): Promise<void> {
     await runStateOp(async () => {
       const user = await ensureUser(chatId);
       user.pendingStep = 'groups_remove';
-      await writeStateToDisk(state);
+      await saveState(state);
     });
     await promptForNextStep(ctx, 'groups_remove');
     return;
@@ -511,15 +580,13 @@ async function removeGroupCommand(ctx: any): Promise<void> {
 
   await runStateOp(async () => {
     const user = await ensureUser(chatId);
-    const current = user.groups ?? [];
-    user.groups = current.filter((g) => !toRemove.includes(g));
+    await setChatGroups(chatId, user, (await chatGroups(chatId)).filter((g) => !toRemove.includes(g)));
     user.pendingStep = undefined;
-    saveTodayBaseline(user);
     user.lastLoeError = undefined;
-    await writeStateToDisk(state);
+    await saveState(state);
   });
 
-  const groups = state.users[chatId]?.groups ?? [];
+  const groups = await chatGroups(chatId);
   await ctx.reply(groups.length ? `Видалено ✅\nТепер групи: ${groups.join(', ')}` : 'Видалено ✅\nГрупи порожні. Використайте /add_group');
   await showSchedule(ctx);
 }
@@ -555,12 +622,11 @@ bot.on('text', async (ctx) => {
 
       await runStateOp(async () => {
         const u = await ensureUser(chatId);
-        u.groups = groups;
+        await setChatGroups(chatId, u, groups);
         u.pendingStep = undefined;
         u.watching = true; // enable by default once groups are set
-        saveTodayBaseline(u);
         u.lastLoeError = undefined;
-        await writeStateToDisk(state);
+        await saveState(state);
       });
 
       await ctx.reply(
@@ -587,15 +653,13 @@ bot.on('text', async (ctx) => {
 
       await runStateOp(async () => {
         const u = await ensureUser(chatId);
-        const current = u.groups ?? [];
-        u.groups = [...current, ...toAdd].filter((g, idx, arr) => arr.indexOf(g) === idx);
+        await setChatGroups(chatId, u, [...new Set([...(await chatGroups(chatId)), ...toAdd])]);
         u.pendingStep = undefined;
-        saveTodayBaseline(u);
         u.lastLoeError = undefined;
-        await writeStateToDisk(state);
+        await saveState(state);
       });
 
-      const groups = state.users[chatId]?.groups ?? [];
+      const groups = await chatGroups(chatId);
       await ctx.reply(`Додано ✅\nТепер групи: ${groups.join(', ')}`);
       await showSchedule(ctx);
       return;
@@ -611,15 +675,13 @@ bot.on('text', async (ctx) => {
 
       await runStateOp(async () => {
         const u = await ensureUser(chatId);
-        const current = u.groups ?? [];
-        u.groups = current.filter((g) => !toRemove.includes(g));
+        await setChatGroups(chatId, u, (await chatGroups(chatId)).filter((g) => !toRemove.includes(g)));
         u.pendingStep = undefined;
-        saveTodayBaseline(u);
         u.lastLoeError = undefined;
-        await writeStateToDisk(state);
+        await saveState(state);
       });
 
-      const groups = state.users[chatId]?.groups ?? [];
+      const groups = await chatGroups(chatId);
       await ctx.reply(groups.length ? `Видалено ✅\nТепер групи: ${groups.join(', ')}` : 'Видалено ✅\nГрупи порожні. Використайте /add_group');
       await showSchedule(ctx);
       return;
@@ -628,8 +690,73 @@ bot.on('text', async (ctx) => {
 });
 
 async function main() {
-  state = await readStateFromDisk();
-  console.info(`[State] Loaded ${Object.keys(state.users).length} chat records from ${STATE_FILE_PATH}`);
+  const importOnly = process.argv.includes('--import-telegram-state');
+  const databaseUrl = process.env.DATABASE_URL;
+  if (databaseUrl) {
+    const botId = token?.match(/^(\d+):/)?.[1];
+    if (!botId) throw new Error('BOT_TOKEN must include the Telegram bot ID to select its PostgreSQL state');
+    telegramStateStore = await openTelegramState({
+      databaseUrl, directUrl: process.env.DATABASE_URL_UNPOOLED, botId,
+    }, readStateFromDisk);
+    state = normalizeStateShape(telegramStateStore.state);
+    const action = telegramStateStore.initialized ? 'Initialized' : 'Loaded';
+    console.info(`[State] ${action} ${Object.keys(state.users).length} chat records in PostgreSQL`);
+  } else {
+    if (importOnly) throw new Error('DATABASE_URL is required to import Telegram state');
+    state = await readStateFromDisk();
+    console.info(`[State] Loaded ${Object.keys(state.users).length} chat records from ${STATE_FILE_PATH}`);
+  }
+  if (importOnly) {
+    await telegramStateStore?.close();
+    return;
+  }
+  accounts = await openConfiguredAccounts();
+  const adminFlag = process.argv.indexOf('--grant-admin');
+  if (adminFlag !== -1) {
+    const email = process.argv[adminFlag + 1];
+    try {
+      if (!email || !accounts || !await accounts.grantAdmin(email)) {
+        throw new Error('A verified email-and-password account is required for administrator access');
+      }
+      console.info('[Accounts] Administrator role granted');
+    } finally {
+      await accounts?.close();
+      await telegramStateStore?.close();
+    }
+    return;
+  }
+  const savedSchedule = await telegramStateStore?.readSchedule();
+  if (savedSchedule) scheduleFeed.restore(savedSchedule.snapshot, savedSchedule.nextFetchAt);
+
+  if (process.env.PWA_PORT) {
+    const scheduleResponse = (result: ReturnType<typeof scheduleFeed.read>): ScheduleResponse => ({
+      snapshot: result.snapshot,
+      refreshFailed: Boolean(result.error),
+      nextFetchAt: scheduleFeed.nextFetchAt(),
+    });
+    pwaServer = await startPwaServer(path.join(REPO_ROOT, 'apps', 'mobile', 'dist', 'browser'), {
+      read: () => scheduleResponse(scheduleFeed.read()),
+      refresh: async () => {
+        const result = await scheduleFeed.refresh('manual');
+        void applySchedule(result).catch(() => console.error('[PWA] Notification processing failed'));
+        return scheduleResponse(result);
+      },
+    }, {
+      webDirectory: path.join(REPO_ROOT, 'apps', 'web', 'dist', 'browser'),
+      adminDirectory: path.join(REPO_ROOT, 'apps', 'admin', 'dist', 'browser'),
+      accounts,
+      telegram: telegramStateStore ? {
+        list: listTelegramSubscriptions, update: updateTelegramSubscription,
+        username: () => bot.botInfo?.username,
+        legacyGroups: (id) => state.users[id]?.groups ?? [],
+        onLinked: (id) => runStateOp(async () => {
+          const user = state.users[id] ?? { watching: true };
+          state.users[id] = { ...user, groups: undefined };
+          await saveState(state);
+        }),
+      } : undefined,
+    });
+  }
 
   // Make commands show up in Telegram UI ("/" menu)
   try {
@@ -705,15 +832,16 @@ async function main() {
   );
 }
 
-main().then(() => {
-  console.log('Bot is running..');
-}).catch((err) => {
+main().catch((err) => {
   // eslint-disable-next-line no-console
   console.error('Fatal startup error:', err);
   process.exit(1);
 });
 
 process.once('SIGINT', () => {
+  pwaServer?.close();
+  void accounts?.close().catch(() => console.error('[Accounts] PostgreSQL shutdown failed'));
+  void telegramStateStore?.close().catch(() => console.error('[State] PostgreSQL shutdown failed'));
   try {
     bot.stop('SIGINT');
   } catch {
@@ -721,6 +849,9 @@ process.once('SIGINT', () => {
   }
 });
 process.once('SIGTERM', () => {
+  pwaServer?.close();
+  void accounts?.close().catch(() => console.error('[Accounts] PostgreSQL shutdown failed'));
+  void telegramStateStore?.close().catch(() => console.error('[State] PostgreSQL shutdown failed'));
   try {
     bot.stop('SIGTERM');
   } catch {

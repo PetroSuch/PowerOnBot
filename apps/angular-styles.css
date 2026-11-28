@@ -1,0 +1,8 @@
+:root{font-family:system-ui,sans-serif;color:#11213a;background:#edf1f7}
+body{margin:0}
+main{max-width:36rem;margin:0 auto;padding:clamp(1.25rem,6vw,4rem)}
+h1{margin:0;font-size:clamp(2rem,7vw,3rem);line-height:1.1}
+h2{font-size:1.125rem;margin:2rem 0 .75rem}
+.brand{color:#294b86;font-weight:750;margin:0 0 .5rem}
+ul{display:grid;grid-template-columns:repeat(auto-fit,minmax(4rem,1fr));gap:.5rem;list-style:none;padding:0;margin:0}
+li{padding:.75rem;text-align:center;border:1px solid #cbd7e6;border-radius:.5rem;background:white}

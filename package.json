@@ -1,25 +1,30 @@
 {
-  "name": "chatbot-power",
+  "name": "poweron",
   "version": "1.0.0",
-  "main": "index.js",
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "build:watch": "tsc -w -p tsconfig.json",
-    "prestart": "npm run build",
-    "start": "nodemon --config nodemon.json dist/index.js",
-    "dev": "concurrently \"npm run build:watch\" \"npm start\""
+  "private": true,
+  "workspaces": [
+    "packages/shared",
+    "apps/telegram-server",
+    "apps/mobile",
+    "apps/web",
+    "apps/admin"
+  ],
+  "engines": {
+    "node": "^20.19.0 || ^22.12.0 || >=24.0.0"
   },
-  "author": "",
-  "license": "ISC",
-  "description": "",
-  "devDependencies": {
-    "@types/node": "^25.0.10",
-    "concurrently": "^9.2.1",
-    "nodemon": "^3.1.11",
-    "typescript": "^5.9.3"
+  "scripts": {
+    "build:shared": "npm run build --workspace @poweron/shared",
+    "build": "npm run build --workspaces",
+    "test": "npm run build:shared && npm run test --workspace @poweron/telegram-server",
+    "start": "npm run build:shared && npm run start --workspace @poweron/telegram-server",
+    "dev": "npm run dev:telegram",
+    "dev:telegram": "npm run build:shared && npm run dev --workspace @poweron/telegram-server",
+    "dev:mobile": "npm run build:shared && npm run start --workspace @poweron/mobile",
+    "dev:web": "npm run build:shared && npm run start --workspace @poweron/web",
+    "dev:admin": "npm run build:shared && npm run start --workspace @poweron/admin"
   },
   "dependencies": {
-    "cheerio": "^1.2.0",
-    "telegraf": "^4.16.3"
+    "@neon/config": "^1.14.8",
+    "@neon/env": "^2.1.11"
   }
 }

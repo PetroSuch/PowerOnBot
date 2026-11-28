@@ -1,75 +1,140 @@
-<main>
-  <header>
-    <p class="brand">PowerOn</p>
-    <h1>Графік відключень</h1>
-  </header>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="wordmark" href="/" aria-label="PowerOn, головна">
+      <span class="brand-icon" aria-hidden="true"><span class="bolt"></span></span>
+      PowerOn
+    </a>
+    <button class="icon-button" type="button" aria-label="Сповіщення"
+      (click)="openView('notifications', content)">
+      <span class="icon bell-icon" aria-hidden="true"></span>
+    </button>
+  </div>
+</header>
 
-  <section aria-labelledby="groups">
-    <h2 id="groups">Ваші групи</h2>
-    <div class="group-grid">
-      @for (group of possibleGroups; track group) {
-        <button type="button" [attr.aria-pressed]="groups().includes(group)"
-          [disabled]="changingPush()" (click)="toggleGroup(group)">{{ group }}</button>
-      }
-    </div>
-  </section>
+<main #content tabindex="-1" [attr.aria-labelledby]="view() + '-title'">
+  @switch (view()) {
+    @case ('schedule') {
+      <section class="hero">
+        <div class="hero-art" aria-hidden="true">
+          <div class="orbit"></div>
+          <div class="power-disc"><span class="bolt"></span></div>
+        </div>
+        <div class="hero-content">
+          <h1 id="schedule-title">Графік<br>відключень</h1>
+          <button class="group-summary" type="button" (click)="openView('groups', content)">
+            @if (groups().length) {
+              <span>{{ groups().length === 1 ? 'Група ' + groups()[0] : 'Ваші групи · ' + groups().length }}</span>
+            } @else {
+              <span>Обрати групи</span>
+            }
+            <span class="chevron" aria-hidden="true"></span>
+          </button>
+        </div>
+      </section>
 
-  <section aria-labelledby="schedule">
-    <div class="section-heading">
-      <h2 id="schedule">Розклад</h2>
-      <button class="secondary" type="button" [disabled]="loading()" (click)="load(true)">Оновити</button>
-    </div>
-    <div class="metadata" aria-live="polite">
-      @if (updated()) { <p>Отримано {{ updated() }} за Києвом</p> }
-      @if (nextFetch()) { <p>Наступний запит до джерела з {{ nextFetch() }}</p> }
-      @if (loading()) { <p>Завантаження графіка…</p> }
-      @if (scheduleError()) { <p>{{ scheduleError() }}</p> }
-      @if (response()?.refreshFailed) { <p>Джерело графіків тимчасово недоступне.</p> }
-    </div>
-    @if (!groups().length) {
-      <p>Оберіть хоча б одну групу, щоб переглянути її графік.</p>
-    } @else {
-      @for (entry of days(); track entry.key) {
-        <article>
-          <h3>{{ entry.label }} @if (entry.day) { <time [attr.datetime]="entry.day.date">{{ entry.day.date.split('-').reverse().join('.') }}</time> }</h3>
-          @if (entry.day; as day) {
-            <dl>
+      <section class="schedule-section" aria-labelledby="schedule-heading">
+        <div class="section-heading">
+          <h2 id="schedule-heading">Розклад</h2>
+          <button class="refresh" type="button" [disabled]="loading()" (click)="load(true)">
+            <span class="refresh-icon" aria-hidden="true"></span>
+            {{ loading() ? 'Оновлення…' : 'Оновити' }}
+          </button>
+        </div>
+        <div class="day-switch" role="group" aria-label="День графіка">
+          <button type="button" [attr.aria-pressed]="selectedDay() === 'today'" (click)="selectedDay.set('today')">Сьогодні</button>
+          <button type="button" [attr.aria-pressed]="selectedDay() === 'tomorrow'" (click)="selectedDay.set('tomorrow')">Завтра</button>
+        </div>
+        <div class="surface" [attr.aria-busy]="loading()">
+          @if (!groups().length) {
+            <h3>Який у вас номер групи?</h3>
+            <p>Оберіть групи, щоб бачити години відключень.</p>
+            <button class="primary" type="button" (click)="openView('groups', content)">Обрати групи</button>
+          } @else if (schedule().day; as day) {
+            <div class="date-line">
+              <time [attr.datetime]="day.date">{{ day.date.split('-').reverse().join('.') }}</time>
+              @if (schedule().stale) { <span>Збережений графік</span> }
+            </div>
+            <dl class="schedule-list">
               @for (group of groups(); track group) {
                 <div>
-                  <dt>{{ group }}</dt>
+                  <dt><span class="visually-hidden">Група </span>{{ group }}</dt>
                   <dd>{{ day.groups[group] ?? 'Графік для цієї групи ще недоступний.' }}</dd>
                 </div>
               }
             </dl>
-            @if (day.imageUrl) { <a [href]="day.imageUrl" target="_blank" rel="noopener">Оригінал графіка</a> }
+            @if (day.imageUrl) {
+              <a class="source" [href]="day.imageUrl" target="_blank" rel="noopener">Оригінал графіка <span aria-hidden="true">↗</span></a>
+            }
           } @else {
-            <p>Графік ще недоступний.</p>
+            <p>{{ loading() ? 'Завантажуємо графік…' : 'Графік ще недоступний.' }}</p>
           }
-        </article>
-      }
+        </div>
+        <div class="metadata" aria-live="polite">
+          @if (updated()) { <p>Дані від {{ updated() }} за Києвом</p> }
+          @if (nextFetch()) { <p>Наступний запит до джерела з {{ nextFetch() }}</p> }
+          @if (scheduleError()) { <p>{{ scheduleError() }}</p> }
+          @if (response()?.refreshFailed) { <p>Джерело графіків тимчасово недоступне.</p> }
+        </div>
+      </section>
     }
-  </section>
-
-  <section aria-labelledby="notifications">
-    <div class="section-heading">
-      <h2 id="notifications">Сповіщення</h2>
-      @if (publicKey() && pushAvailable) {
-        <button class="secondary" type="button" [disabled]="changingPush() || !groups().length" (click)="togglePush()">
-          {{ device() ? 'Вимкнути' : 'Увімкнути' }}
-        </button>
-      }
-    </div>
-    @if (pushEnabled()) {
-      <p>Увімкнено для груп {{ groups().join(', ') }}.</p>
-    } @else if (!pushAvailable && isAppleMobile) {
-      <p>На iPhone додайте PowerOn на домашній екран і відкрийте його звідти.</p>
-    } @else if (!pushAvailable) {
-      <p>У цьому режимі сповіщення недоступні.</p>
-    } @else if (!publicKey()) {
-      <p>Сповіщення поки недоступні.</p>
-    } @else if (!groups().length) {
-      <p>Оберіть групи для сповіщень.</p>
+    @case ('groups') {
+      <h1 class="page-title" id="groups-title">Ваші групи</h1>
+      <section class="surface settings">
+        <p>Оберіть групи, за якими хочете стежити.</p>
+        <div class="group-grid" role="group" aria-label="Групи відключень">
+          @for (group of possibleGroups; track group) {
+            <button type="button" [attr.aria-pressed]="groups().includes(group)"
+              [disabled]="changingPush()" (click)="toggleGroup(group)">{{ group }}</button>
+          }
+        </div>
+        @if (groupError()) { <p role="status">{{ groupError() }}</p> }
+        <button class="primary" type="button" (click)="openView('schedule', content)">До графіка</button>
+      </section>
     }
-    @if (pushMessage()) { <p role="status">{{ pushMessage() }}</p> }
-  </section>
+    @case ('notifications') {
+      <h1 class="page-title" id="notifications-title">Сповіщення</h1>
+      <section class="surface settings">
+        <h2>Зміни графіка</h2>
+        @if (pushEnabled()) {
+          @if (serverWatching()) {
+            <p>Увімкнено для груп {{ groups().join(', ') }}.</p>
+          } @else {
+            <p>Сповіщення призупинено адміністратором.</p>
+          }
+        } @else if (!pushAvailable && isAppleMobile) {
+          <p>На iPhone додайте PowerOn на домашній екран і відкрийте його звідти.</p>
+        } @else if (!pushAvailable) {
+          <p>У цьому режимі сповіщення недоступні.</p>
+        } @else if (!publicKey()) {
+          <p>Сповіщення поки недоступні.</p>
+        } @else if (!groups().length) {
+          <p>Оберіть групи для сповіщень.</p>
+          <button class="primary" type="button" (click)="openView('groups', content)">Обрати групи</button>
+        } @else {
+          <p>Отримуйте сповіщення, коли графік для ваших груп зміниться.</p>
+        }
+        @if (publicKey() && pushAvailable && (groups().length || device())) {
+          <button class="primary" type="button" [disabled]="changingPush() || !groups().length" (click)="togglePush()">
+            {{ device() ? 'Вимкнути сповіщення' : 'Увімкнути сповіщення' }}
+          </button>
+        }
+        @if (pushMessage()) { <p role="status">{{ pushMessage() }}</p> }
+      </section>
+    }
+  }
 </main>
+
+<nav class="bottom-nav" aria-label="Головна навігація">
+  <div class="nav-inner">
+    <button type="button" [attr.aria-current]="view() === 'schedule' ? 'page' : null" (click)="openView('schedule', content)">
+      <span class="icon calendar-icon" aria-hidden="true"></span>Графік
+    </button>
+    <button type="button" [attr.aria-current]="view() === 'groups' ? 'page' : null" (click)="openView('groups', content)">
+      <span class="icon groups-icon" aria-hidden="true"></span>Групи
+    </button>
+    <button type="button" [attr.aria-current]="view() === 'notifications' ? 'page' : null" (click)="openView('notifications', content)">
+      <span class="icon bell-icon" aria-hidden="true"></span>Сповіщення
+    </button>
+    <a href="/account.html"><span class="icon user-icon" aria-hidden="true"></span>Акаунт</a>
+  </div>
+</nav>

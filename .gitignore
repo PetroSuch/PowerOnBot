@@ -1,4 +1,8 @@
 node_modules/
+dist/
+.angular/
+out-tsc/
+label-state.json.*.tmp
 
 # Logs
 *.log
@@ -15,3 +19,4 @@ pnpm-debug.log*
 .DS_Store
 .vscode/
 
+.neon

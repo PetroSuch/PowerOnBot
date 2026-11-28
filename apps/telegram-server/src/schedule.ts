@@ -1,23 +1,7 @@
 import { load } from 'cheerio';
+import { POSSIBLE_GROUPS, type ScheduleDay, type ScheduleSnapshot } from '@poweron/shared';
 
 export const REFRESH_INTERVAL_MS = 10 * 60 * 1000;
-export const POSSIBLE_GROUPS: readonly string[] = [
-  '1.1', '1.2', '2.1', '2.2', '3.1', '3.2',
-  '4.1', '4.2', '5.1', '5.2', '6.1', '6.2',
-];
-
-export type ScheduleDay = {
-  date: string;
-  headers: string[];
-  groups: Record<string, string>;
-  imageUrl: string;
-};
-
-export type ScheduleSnapshot = {
-  fetchedAt: number;
-  today?: ScheduleDay;
-  tomorrow?: ScheduleDay;
-};
 
 type RefreshResult = {
   snapshot?: ScheduleSnapshot;
@@ -152,7 +136,8 @@ export function createScheduleFeed(fetchSnapshot = fetchSchedule, now = Date.now
     const startedAt = now();
     if (startedAt < nextFetchAt) {
       const result = latest.snapshot ? 'using cached schedule' : 'no saved schedule available';
-      log(`[LOE] ${trigger} check skipped upstream fetch after fetch #${fetchCount} (${result}, retry in ${Math.ceil((nextFetchAt - startedAt) / 1000)}s)`);
+      const previousRequest = fetchCount ? ` after fetch #${fetchCount}` : '';
+      log(`[LOE] ${trigger} check skipped upstream fetch${previousRequest} (${result}, retry in ${Math.ceil((nextFetchAt - startedAt) / 1000)}s)`);
       return Promise.resolve(latest);
     }
 
@@ -180,6 +165,10 @@ export function createScheduleFeed(fetchSnapshot = fetchSchedule, now = Date.now
 
   return {
     refresh,
+    restore(snapshot: ScheduleSnapshot, fetchAt: number) {
+      latest = { snapshot };
+      nextFetchAt = fetchAt;
+    },
     read: () => latest,
     nextFetchAt: () => nextFetchAt,
   };

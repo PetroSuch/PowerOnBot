@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Акаунт PowerOn</title>
+  <link rel="stylesheet" href="/account.css">
+  <script type="module" src="/account.js"></script>
+</head>
+<body>
+<main>
+  <a id="back" href="/">PowerOn</a>
+  <h1>Акаунт</h1>
+  <p id="message" role="status"></p>
+  <form id="credentials" hidden>
+    <label>Email <input name="email" type="email" autocomplete="email" required></label>
+    <label>Пароль <input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit" value="login">Увійти</button>
+    <button type="submit" value="register">Зареєструватися</button>
+    <button type="button" id="forgot">Відновити пароль</button>
+  </form>
+  <button type="button" id="google-sign-in" hidden>Увійти через Google</button>
+  <form id="reset" hidden>
+    <label>Новий пароль <input name="password" type="password" minlength="12" autocomplete="new-password" required></label>
+    <button>Зберегти пароль</button>
+  </form>
+  <section id="profile" hidden>
+    <p id="email"></p>
+    <button type="button" id="google-link" hidden>Під’єднати Google</button>
+    <h2>Вибрані групи</h2>
+    <form id="groups-form"><div id="groups"></div><button>Зберегти групи</button></form>
+    <h2>Telegram</h2>
+    <p id="telegram-status"></p>
+    <button type="button" id="connect">Під’єднати Telegram</button>
+    <a id="telegram-link" hidden rel="noopener noreferrer" target="_blank">Відкрити бота</a>
+    <button type="button" id="check-link">Перевірити прив’язку</button>
+    <button type="button" id="confirm-link" hidden>Підтвердити</button>
+    <section id="admin" hidden>
+      <h2>Захист адмінпанелі</h2>
+      <form id="enroll">
+        <label>Пароль <input name="password" type="password" autocomplete="current-password" required></label>
+        <button>Налаштувати TOTP</button>
+      </form>
+      <div id="totp-setup" hidden>
+        <p>Додайте ключ у застосунок для автентифікації й збережіть резервні коди в безпечному місці.</p>
+        <pre id="totp-secret"></pre><pre id="backup-codes"></pre>
+      </div>
+      <a id="admin-link" href="/admin/" hidden>Відкрити адмінпанель</a>
+    </section>
+    <p><button type="button" id="logout">Вийти</button></p>
+  </section>
+  <form id="totp" hidden>
+    <label>Код з автентифікатора <input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" required></label>
+    <button>Підтвердити код</button>
+  </form>
+</main>
+</body>
+</html>

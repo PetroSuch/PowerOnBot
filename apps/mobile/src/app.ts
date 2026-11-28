@@ -11,6 +11,7 @@ const timeFormat = new Intl.DateTimeFormat('uk-UA', {
 const calendar = new Intl.DateTimeFormat('sv-SE', {
   timeZone: 'Europe/Kyiv', year: 'numeric', month: '2-digit', day: '2-digit',
 });
+type View = 'schedule' | 'groups' | 'notifications';
 
 function savedGroups(): string[] {
   try {
@@ -32,12 +33,15 @@ function newDeviceToken(): string {
 })
 export class App {
   private readonly swPush = inject(SwPush);
+  protected readonly view = signal<View>('schedule');
+  protected readonly selectedDay = signal<'today' | 'tomorrow'>('today');
   protected readonly possibleGroups = POSSIBLE_GROUPS;
   protected readonly groups = signal(savedGroups());
   protected readonly response = signal<ScheduleResponse | null>(null);
   protected readonly loading = signal(false);
   protected readonly changingPush = signal(false);
   protected readonly scheduleError = signal('');
+  protected readonly groupError = signal('');
   protected readonly pushMessage = signal('');
   protected readonly publicKey = signal<string | null>(null);
   protected readonly pushAvailable = this.swPush.isEnabled && typeof Notification !== 'undefined'
@@ -45,17 +49,18 @@ export class App {
   protected readonly isAppleMobile = /iPhone|iPad|iPod/.test(navigator.userAgent)
     || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   protected readonly device = signal(localStorage.getItem(pushKey));
+  private signedIn = false;
+  protected readonly serverWatching = signal(true);
   protected readonly pushEnabled = computed(() => !!this.device() && this.pushAvailable && Notification.permission === 'granted');
   private readonly clock = signal(Date.now());
-  protected readonly days = computed(() => {
+  protected readonly schedule = computed(() => {
     const snapshot = this.response()?.snapshot;
     const now = this.clock();
     const today = calendar.format(now);
     const tomorrow = calendar.format(Date.parse(`${today}T12:00:00Z`) + 24 * 60 * 60 * 1000);
-    return [
-      { key: 'today', label: snapshot?.today && snapshot.today.date !== today ? 'Збережений графік' : 'Сьогодні', day: snapshot?.today },
-      { key: 'tomorrow', label: snapshot?.tomorrow && snapshot.tomorrow.date !== tomorrow ? 'Збережений графік' : 'Завтра', day: snapshot?.tomorrow },
-    ];
+    const isToday = this.selectedDay() === 'today';
+    const day = isToday ? snapshot?.today : snapshot?.tomorrow;
+    return { day, stale: !!day && day.date !== (isToday ? today : tomorrow) };
   });
   protected readonly updated = computed(() => {
     const at = this.response()?.snapshot?.fetchedAt;
@@ -66,11 +71,18 @@ export class App {
     return next > this.clock() ? timeFormat.format(next) : '';
   });
 
+  protected openView(view: View, content: HTMLElement) {
+    if (this.view() === view) return;
+    this.view.set(view);
+    window.scrollTo(0, 0);
+    requestAnimationFrame(() => content.focus({ preventScroll: true }));
+  }
+
   constructor() {
     const timer = setInterval(() => this.clock.set(Date.now()), 1000);
     inject(DestroyRef).onDestroy(() => clearInterval(timer));
     void this.load();
-    void fetch('/api/push/config')
+    void this.loadAccount().then(() => fetch('/api/push/config'))
       .then(async (response) => {
         if (response.ok) {
           const config = await response.json() as { publicKey: string | null };
@@ -79,6 +91,18 @@ export class App {
         }
       })
       .catch(() => this.pushMessage.set('Налаштування сповіщень тимчасово недоступні.'));
+  }
+
+  private async loadAccount() {
+    try {
+      const response = await fetch('/api/me');
+      if (!response.ok) return;
+      const account = await response.json() as { groups: string[] };
+      this.signedIn = true;
+      this.groups.set(account.groups);
+    } catch {
+      // Public schedules remain available offline.
+    }
   }
 
   protected async load(refresh = false) {
@@ -104,9 +128,14 @@ export class App {
     const next = POSSIBLE_GROUPS.filter((id) => id === group ? !current.includes(id) : current.includes(id));
     const token = this.device();
     this.changingPush.set(true);
-    this.pushMessage.set('');
+    this.groupError.set('');
     try {
-      if (token) {
+      if (this.signedIn) {
+        const response = await fetch('/api/me/groups', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(next),
+        });
+        if (!response.ok) throw new Error('Could not save account groups');
+      } else if (token) {
         if (!next.length) {
           await this.disablePush(token);
         } else {
@@ -116,9 +145,9 @@ export class App {
         }
       }
       this.groups.set(next);
-      localStorage.setItem(groupsKey, JSON.stringify(next));
+      if (!this.signedIn) localStorage.setItem(groupsKey, JSON.stringify(next));
     } catch {
-      this.pushMessage.set('Не вдалося зберегти групи для сповіщень. Спробуйте ще раз.');
+      this.groupError.set('Не вдалося зберегти групи. Спробуйте ще раз.');
     } finally {
       this.changingPush.set(false);
     }
@@ -145,6 +174,7 @@ export class App {
         await this.savePush(newToken, newSubscription, this.groups());
         localStorage.setItem(pushKey, newToken);
         this.device.set(newToken);
+        this.serverWatching.set(true);
       }
     } catch {
       await newSubscription?.unsubscribe().catch(() => {});
@@ -156,12 +186,29 @@ export class App {
 
   private async restorePush(key: string) {
     const token = this.device();
-    if (!token || !this.groups().length || this.changingPush()) return;
+    if (!token || this.changingPush()) return;
     this.changingPush.set(true);
     try {
+      const response = await fetch('/api/push/subscription', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok && response.status !== 404) throw new Error('Push settings unavailable');
+      let effectiveGroups = this.groups();
+      if (response.ok) {
+        const preferences = await response.json() as { groups: string[]; watching: boolean };
+        effectiveGroups = this.signedIn && this.groups().length ? this.groups() : preferences.groups;
+        if (!this.signedIn) {
+          this.groups.set(preferences.groups);
+          localStorage.setItem(groupsKey, JSON.stringify(preferences.groups));
+        }
+        this.serverWatching.set(preferences.watching);
+      }
       const current = await firstValueFrom(this.swPush.subscription);
-      const subscription = current ?? await this.swPush.requestSubscription({ serverPublicKey: key });
-      await this.savePush(token, subscription, this.groups());
+      if (effectiveGroups.length && (!current || response.status === 404 || this.signedIn)) {
+        const subscription = current ?? await this.swPush.requestSubscription({ serverPublicKey: key });
+        await this.savePush(token, subscription, effectiveGroups);
+        if (this.signedIn) await this.loadAccount();
+      }
     } catch {
       this.pushMessage.set('Не вдалося перевірити підписку на сповіщення.');
     } finally {
@@ -182,7 +229,7 @@ export class App {
     const response = await fetch('/api/push/subscription', {
       method: 'DELETE', headers: { Authorization: `Bearer ${token}` },
     });
-    if (!response.ok) throw new Error('Push unsubscribe failed');
+    if (!response.ok && response.status !== 404) throw new Error('Push unsubscribe failed');
     localStorage.removeItem(pushKey);
     this.device.set(null);
     await this.swPush.unsubscribe().catch(() => {});

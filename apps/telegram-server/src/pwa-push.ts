@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
-import { Pool } from 'pg';
+import { Client, Pool } from 'pg';
 import webPush, { type PushSubscription } from 'web-push';
-import { POSSIBLE_GROUPS, type ScheduleDay, type ScheduleSnapshot } from '@poweron/shared';
+import { POSSIBLE_GROUPS, type ManagedSubscription, type ScheduleDay, type ScheduleSnapshot } from '@poweron/shared';
 import { kyivDate } from './schedule';
+import type { Accounts } from './accounts';
 
 type DayBaseline = { date: string; groups: Record<string, string | null> };
 type Baseline = { today?: DayBaseline; tomorrow?: DayBaseline };
@@ -51,8 +52,8 @@ export function parsePushRegistration(value: unknown): { subscription: PushSubsc
   return { subscription: { endpoint: url.href, keys: { p256dh: keys.p256dh, auth: keys.auth } }, groups: [...new Set(groups)] };
 }
 
-export async function createPwaPushService() {
-  const { DATABASE_URL, VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY } = process.env;
+export async function createPwaPushService(accounts?: Accounts) {
+  const { DATABASE_URL, DATABASE_URL_UNPOOLED, VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY } = process.env;
   if (!VAPID_SUBJECT && !VAPID_PUBLIC_KEY && !VAPID_PRIVATE_KEY) return undefined;
   if (!DATABASE_URL || !VAPID_SUBJECT || !VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
     throw new Error('PWA push requires DATABASE_URL, VAPID_SUBJECT, VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY');
@@ -61,25 +62,48 @@ export async function createPwaPushService() {
   webPush.setVapidDetails(vapidDetails.subject, vapidDetails.publicKey, vapidDetails.privateKey);
   const db = new Pool({ connectionString: DATABASE_URL, connectionTimeoutMillis: 5000 });
   db.on('error', () => console.error('[PWA] PostgreSQL connection error'));
+  const direct = DATABASE_URL_UNPOOLED
+    ? new Client({ connectionString: DATABASE_URL_UNPOOLED, connectionTimeoutMillis: 5000 })
+    : undefined;
   try {
-    await db.query(`
+    await direct?.connect();
+    await (direct ?? db).query(`
       CREATE TABLE IF NOT EXISTS pwa_push_devices (
         device_key bytea PRIMARY KEY,
         subscription jsonb NOT NULL,
         groups text[] NOT NULL,
         baseline jsonb NOT NULL,
         revision integer NOT NULL DEFAULT 0
-      )
+      );
+      ALTER TABLE pwa_push_devices ADD COLUMN IF NOT EXISTS watching boolean NOT NULL DEFAULT true
+    `);
+    if (accounts) await (direct ?? db).query(`
+      ALTER TABLE pwa_push_devices ADD COLUMN IF NOT EXISTS user_id uuid REFERENCES poweron_users ON DELETE CASCADE
     `);
   } catch (error) {
     await db.end();
     throw error;
+  } finally {
+    await direct?.end();
   }
 
   const deviceKey = (token: string) => createHash('sha256').update(token).digest();
+  const hasOwnership = !!accounts || (await db.query(`
+    SELECT 1 FROM pg_attribute WHERE attrelid = 'pwa_push_devices'::regclass AND attname = 'user_id'
+      AND NOT attisdropped
+  `)).rowCount === 1;
+  const effectiveGroups = accounts
+    ? `CASE WHEN user_id IS NULL THEN groups ELSE ARRAY(
+        SELECT group_id FROM poweron_user_groups WHERE user_id = pwa_push_devices.user_id ORDER BY group_id
+      ) END AS groups`
+    : 'groups';
+  const ownership = hasOwnership ? ' AND (user_id IS NULL OR user_id = $2)' : '';
+  const legacyOnly = hasOwnership && !accounts ? ' AND user_id IS NULL' : '';
 
   async function publish(snapshot: ScheduleSnapshot) {
-    const { rows } = await db.query<Device>('SELECT * FROM pwa_push_devices');
+    const { rows } = await db.query<Device>(
+      `SELECT device_key, subscription, ${effectiveGroups}, baseline, revision FROM pwa_push_devices WHERE watching${legacyOnly}`,
+    );
     for (let index = 0; index < rows.length; index += 10) {
       await Promise.all(rows.slice(index, index + 10).map(async (device) => {
         const { baseline, alerts } = comparePushSchedule(snapshot, device.groups, device.baseline);
@@ -113,19 +137,70 @@ export async function createPwaPushService() {
 
   return {
     publicKey: VAPID_PUBLIC_KEY,
-    async save(token: string, subscription: PushSubscription, groups: string[], snapshot?: ScheduleSnapshot) {
+    async preferences(token: string, userId?: string) {
+      const result = await db.query<{ groups: string[]; watching: boolean }>(
+        `SELECT ${effectiveGroups}, watching FROM pwa_push_devices WHERE device_key = $1${ownership}`,
+        hasOwnership ? [deviceKey(token), userId ?? null] : [deviceKey(token)],
+      );
+      return result.rows[0];
+    },
+    async list(): Promise<ManagedSubscription[]> {
+      const { rows } = await db.query<Omit<ManagedSubscription, 'channel'>>(
+        `SELECT encode(device_key, 'hex') AS id, ${effectiveGroups}, watching FROM pwa_push_devices ORDER BY device_key`,
+      );
+      return rows.map((row) => ({ ...row, channel: 'push' }));
+    },
+    async update(id: string, groups: string[], watching: boolean, snapshot?: ScheduleSnapshot) {
       const baseline = snapshot ? comparePushSchedule(snapshot, groups).baseline : {};
+      if (accounts) {
+        const owner = await db.query<{ user_id: string | null }>(
+          "SELECT user_id FROM pwa_push_devices WHERE device_key = decode($1, 'hex')", [id]);
+        if (owner.rows[0]?.user_id) await accounts.replaceGroups(owner.rows[0].user_id, groups);
+      }
+      const result = await db.query(`
+        UPDATE pwa_push_devices SET groups = $2, watching = $3, baseline = $4, revision = revision + 1
+        WHERE device_key = decode($1, 'hex')
+      `, [id, groups, watching, baseline]);
+      return result.rowCount === 1;
+    },
+    async save(token: string, subscription: PushSubscription, groups: string[], snapshot?: ScheduleSnapshot, userId?: string) {
+      const baseline = snapshot ? comparePushSchedule(snapshot, groups).baseline : {};
+      if (accounts) {
+        const result = await db.query(`
+          INSERT INTO pwa_push_devices (device_key, subscription, groups, baseline, user_id)
+          VALUES ($1, $2, $3, $4, $5)
+          ON CONFLICT (device_key) DO UPDATE SET subscription = EXCLUDED.subscription,
+            groups = EXCLUDED.groups, baseline = EXCLUDED.baseline,
+            user_id = COALESCE(pwa_push_devices.user_id, EXCLUDED.user_id), revision = pwa_push_devices.revision + 1
+          WHERE (pwa_push_devices.user_id IS NULL OR pwa_push_devices.user_id = EXCLUDED.user_id)
+            AND (pwa_push_devices.subscription IS DISTINCT FROM EXCLUDED.subscription
+              OR pwa_push_devices.groups IS DISTINCT FROM EXCLUDED.groups
+              OR pwa_push_devices.user_id IS DISTINCT FROM EXCLUDED.user_id)
+        `, [deviceKey(token), subscription, groups, baseline, userId ?? null]);
+        if (result.rowCount && userId) await accounts.importGroups(userId, groups);
+        if (result.rowCount === 1) return true;
+        const existing = await db.query(`
+          SELECT 1 FROM pwa_push_devices WHERE device_key = $1
+            AND user_id IS NOT DISTINCT FROM $2
+        `, [deviceKey(token), userId ?? null]);
+        return existing.rowCount === 1;
+      }
       await db.query(`
         INSERT INTO pwa_push_devices (device_key, subscription, groups, baseline)
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (device_key) DO UPDATE SET subscription = EXCLUDED.subscription, groups = EXCLUDED.groups,
           baseline = EXCLUDED.baseline, revision = pwa_push_devices.revision + 1
-        WHERE pwa_push_devices.subscription IS DISTINCT FROM EXCLUDED.subscription
-          OR pwa_push_devices.groups IS DISTINCT FROM EXCLUDED.groups
+        WHERE (pwa_push_devices.subscription IS DISTINCT FROM EXCLUDED.subscription
+          OR pwa_push_devices.groups IS DISTINCT FROM EXCLUDED.groups)${legacyOnly}
       `, [deviceKey(token), subscription, groups, baseline]);
+      if (!legacyOnly) return true;
+      const legacy = await db.query('SELECT 1 FROM pwa_push_devices WHERE device_key = $1 AND user_id IS NULL', [deviceKey(token)]);
+      return legacy.rowCount === 1;
     },
-    async remove(token: string) {
-      await db.query('DELETE FROM pwa_push_devices WHERE device_key = $1', [deviceKey(token)]);
+    async remove(token: string, userId?: string) {
+      const result = await db.query(`DELETE FROM pwa_push_devices WHERE device_key = $1${ownership}`,
+        hasOwnership ? [deviceKey(token), userId ?? null] : [deviceKey(token)]);
+      return result.rowCount === 1;
     },
     publish,
     close: () => db.end(),

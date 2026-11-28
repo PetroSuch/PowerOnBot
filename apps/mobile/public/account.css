@@ -1,0 +1,10 @@
+:root { font-family: system-ui, sans-serif; background: #edf1f7; color: #193764; }
+main { max-width: 38rem; margin: auto; padding: 1rem; }
+button, input { font: inherit; min-height: 44px; }
+button { margin: .25rem; }
+label { display: block; margin: .4rem 0; }
+a { color: #294b86; }
+#groups { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .4rem; }
+#groups input { vertical-align: middle; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+[hidden] { display: none !important; }

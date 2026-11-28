@@ -18,7 +18,7 @@ function html(first, second = 'Є електроенергія.') {
   return `<h2>Графік погодинних відключень</h2><p>Група 1,1. ${first}</p><p>Група 1.2. ${second}</p>`;
 }
 
-function createBot(users, initialFile = JSON.stringify({ users })) {
+function createBot(users, initialFile = JSON.stringify({ users }), openDatabase, accounts) {
   let now = startTime;
   let disk = initialFile;
   let pendingWrite;
@@ -52,11 +52,15 @@ function createBot(users, initialFile = JSON.stringify({ users })) {
     async launch() {}
   }
   vm.runInNewContext(compiledBot, {
+    __dirname: require('node:path').dirname(require.resolve('../dist/index.js')),
     Date: class extends Date { static now() { return now; } },
     console: { log() {}, info: log, error: (...args) => startupErrors.push(args.join(' ')) },
     exports: {},
     require(name) {
       if (name === 'telegraf') return { Telegraf: MockTelegraf };
+      if (name === './pwa') return require('../dist/pwa.js');
+      if (name === './accounts') return { openConfiguredAccounts: async () => accounts };
+      if (name === './telegram-state') return { openTelegramState: openDatabase };
       if (name === 'node:fs/promises') return mockFs;
       if (name === './schedule') return {
         ...schedule,
@@ -67,7 +71,10 @@ function createBot(users, initialFile = JSON.stringify({ users })) {
       };
       return require(name);
     },
-    process: { env: { BOT_TOKEN: 'test' }, cwd: () => '.', pid: 1, loadEnvFile() {}, once() {}, exit: (code) => exits.push(code) },
+    process: {
+      env: openDatabase ? { BOT_TOKEN: '123:test', DATABASE_URL: 'postgres://test' } : { BOT_TOKEN: 'test' },
+      argv: [], cwd: () => '.', pid: 1, loadEnvFile() {}, once() {}, exit: (code) => exits.push(code),
+    },
     setTimeout(callback) { timers.push(callback); },
   });
 
@@ -305,4 +312,49 @@ test('a bot with stale in-memory state refuses to overwrite a changed file', asy
   bot.replaceState(updated);
   await assert.rejects(bot.command('start', 3), /Bot state changed on disk/);
   assert.equal(bot.disk, updated);
+});
+
+test('Telegram reads and saves subscriptions and notification state in PostgreSQL when configured', async () => {
+  const localFile = JSON.stringify({ users: { 2: watching() } });
+  let saved;
+  const bot = createBot({}, localFile, async ({ botId }) => {
+    assert.equal(botId, '123');
+    return {
+      state: { users: { 1: watching() } },
+      async save(state) { saved = JSON.parse(JSON.stringify(state)); },
+      async readSchedule() {},
+      async saveSchedule() {},
+    };
+  });
+  assert.match(await bot.command('groups_list', 1), /1\.1/);
+  await bot.command('add_group', 1, 1, '/add_group 1.2');
+  await bot.runScheduledPass();
+  assert.deepEqual(saved.users[1].groups, ['1.1', '1.2']);
+  assert.ok(saved.users[1].lastLoeWatchedText);
+  assert.equal(bot.disk, localFile);
+});
+
+test('Telegram startup fails without falling back to the local file if PostgreSQL is unavailable', async () => {
+  const bot = createBot({ 1: watching() }, undefined, async () => { throw new Error('database unavailable'); });
+  await bot.flush();
+  assert.deepEqual(bot.exits, [1]);
+  assert.match(bot.startupErrors[0], /database unavailable/);
+  assert.equal(bot.calls, 0);
+});
+
+test('a linked Telegram chat uses and updates the shared account groups', async () => {
+  let groups = ['5.2'];
+  const accounts = {
+    linkedChat: async (id) => id === '1' ? { groups, user_id: 'account' } : undefined,
+    async replaceGroups(id, next) {
+      assert.equal(id, 'account');
+      groups = Array.from(next);
+    },
+  };
+  const bot = createBot({ 1: watching() }, undefined, undefined, accounts);
+  assert.match(await bot.command('groups_list', 1), /5\.2/);
+  await bot.command('add_group', 1, 1, '/add_group 1.2');
+  assert.deepEqual(groups, ['5.2', '1.2']);
+  assert.equal(bot.saved.users[1].groups, undefined);
+  assert.match(await bot.command('groups_list', 1), /5\.2, 1\.2/);
 });
