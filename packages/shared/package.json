@@ -4,10 +4,22 @@
   "private": true,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./schedule": { "types": "./dist/schedule.d.ts", "default": "./dist/schedule.js" },
+    "./schedule-store": { "types": "./dist/schedule-store.d.ts", "default": "./dist/schedule-store.js" },
+    "./push": { "types": "./dist/push.d.ts", "default": "./dist/push.js" }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json"
   },
+  "dependencies": {
+    "cheerio": "^1.2.0",
+    "pg": "^8.23.1"
+  },
   "devDependencies": {
+    "@types/node": "^25.0.10",
+    "@types/pg": "^8.23.1",
     "typescript": "~5.9.3"
   }
 }

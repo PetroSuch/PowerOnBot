@@ -1,17 +1,18 @@
 import { Component, computed, DestroyRef, inject, signal } from '@angular/core';
 import { SwPush } from '@angular/service-worker';
 import { firstValueFrom } from 'rxjs';
-import { POSSIBLE_GROUPS, type ScheduleResponse } from '@poweron/shared';
+import { POSSIBLE_GROUPS, type MobileDevice, type ScheduleResponse } from '@poweron/shared';
 
 const groupsKey = 'poweron.groups';
-const pushKey = 'poweron.pushDevice';
+const deviceKey = 'poweron.device';
+const nameKey = 'poweron.deviceName';
 const timeFormat = new Intl.DateTimeFormat('uk-UA', {
   timeZone: 'Europe/Kyiv', dateStyle: 'short', timeStyle: 'short',
 });
 const calendar = new Intl.DateTimeFormat('sv-SE', {
   timeZone: 'Europe/Kyiv', year: 'numeric', month: '2-digit', day: '2-digit',
 });
-type View = 'schedule' | 'groups' | 'notifications';
+type View = 'schedule' | 'groups' | 'notifications' | 'profile';
 
 function savedGroups(): string[] {
   try {
@@ -22,8 +23,17 @@ function savedGroups(): string[] {
   }
 }
 
-function newDeviceToken(): string {
-  return Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) => byte.toString(16).padStart(2, '0')).join('');
+function deviceToken(): string {
+  for (const key of [deviceKey, 'poweron.pushDevice']) {
+    const saved = localStorage.getItem(key);
+    if (saved && /^[a-f0-9]{64}$/.test(saved)) {
+      localStorage.setItem(deviceKey, saved);
+      return saved;
+    }
+  }
+  const token = Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  localStorage.setItem(deviceKey, token);
+  return token;
 }
 
 @Component({
@@ -48,10 +58,10 @@ export class App {
     && typeof PushManager !== 'undefined';
   protected readonly isAppleMobile = /iPhone|iPad|iPod/.test(navigator.userAgent)
     || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  protected readonly device = signal(localStorage.getItem(pushKey));
-  private signedIn = false;
-  protected readonly serverWatching = signal(true);
-  protected readonly pushEnabled = computed(() => !!this.device() && this.pushAvailable && Notification.permission === 'granted');
+  private readonly token = deviceToken();
+  protected readonly name = signal(localStorage.getItem(nameKey));
+  protected readonly profileMessage = signal('');
+  protected readonly pushEnabled = signal(false);
   private readonly clock = signal(Date.now());
   protected readonly schedule = computed(() => {
     const snapshot = this.response()?.snapshot;
@@ -82,26 +92,69 @@ export class App {
     const timer = setInterval(() => this.clock.set(Date.now()), 1000);
     inject(DestroyRef).onDestroy(() => clearInterval(timer));
     void this.load();
-    void this.loadAccount().then(() => fetch('/api/push/config'))
-      .then(async (response) => {
-        if (response.ok) {
-          const config = await response.json() as { publicKey: string | null };
-          this.publicKey.set(config.publicKey);
-          if (this.pushEnabled() && config.publicKey) await this.restorePush(config.publicKey);
-        }
-      })
-      .catch(() => this.pushMessage.set('Налаштування сповіщень тимчасово недоступні.'));
+    this.changingPush.set(true);
+    void this.loadDevice()
+      .catch(() => this.profileMessage.set('???????????? ???????? ????????? ??????????.'))
+      .finally(() => this.changingPush.set(false));
+    void this.loadPushConfig();
   }
 
-  private async loadAccount() {
+  private async loadDevice() {
+    const response = await this.deviceRequest('/api/device');
+    if (response.status === 404) {
+      if (this.groups().length || this.name()) await this.saveDevice(this.groups(), this.name());
+      return;
+    }
+    if (!response.ok) throw new Error('Device profile unavailable');
+    this.applyDevice(await response.json() as MobileDevice);
+  }
+
+  private async loadPushConfig() {
     try {
-      const response = await fetch('/api/me');
-      if (!response.ok) return;
-      const account = await response.json() as { groups: string[] };
-      this.signedIn = true;
-      this.groups.set(account.groups);
+      const response = await fetch('/api/push/config', { signal: AbortSignal.timeout(8000) });
+      if (!response.ok) throw new Error('Push setup unavailable');
+      const config = await response.json() as { publicKey: string | null };
+      this.publicKey.set(config.publicKey);
     } catch {
-      // Public schedules remain available offline.
+      this.pushMessage.set('???????????? ????????? ????????? ??????????.');
+    }
+  }
+
+  private applyDevice(device: MobileDevice) {
+    this.groups.set(device.groups);
+    this.name.set(device.name);
+    this.pushEnabled.set(device.notificationsEnabled);
+    localStorage.setItem(groupsKey, JSON.stringify(device.groups));
+    if (device.name) localStorage.setItem(nameKey, device.name);
+    else localStorage.removeItem(nameKey);
+  }
+
+  private deviceRequest(path: string, method = 'GET', body?: unknown) {
+    const headers = new Headers({ Authorization: 'Bearer ' + this.token });
+    if (body !== undefined) headers.set('Content-Type', 'application/json');
+    return fetch(path, {
+      method, headers, body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(8000),
+    });
+  }
+
+  private async saveDevice(groups: string[], name: string | null) {
+    const response = await this.deviceRequest('/api/device', 'PUT', { groups, name });
+    if (!response.ok) throw new Error('Could not save device profile');
+    this.applyDevice(await response.json() as MobileDevice);
+  }
+
+  protected async saveName(name: string) {
+    if (this.changingPush()) return;
+    this.changingPush.set(true);
+    this.profileMessage.set('');
+    try {
+      await this.saveDevice(this.groups(), name.trim() || null);
+      this.profileMessage.set('???? ?????????.');
+    } catch {
+      this.profileMessage.set('?? ??????? ???????? ????. ????????? ?? ???.');
+    } finally {
+      this.changingPush.set(false);
     }
   }
 
@@ -126,112 +179,48 @@ export class App {
     if (this.changingPush()) return;
     const current = this.groups();
     const next = POSSIBLE_GROUPS.filter((id) => id === group ? !current.includes(id) : current.includes(id));
-    const token = this.device();
     this.changingPush.set(true);
     this.groupError.set('');
     try {
-      if (this.signedIn) {
-        const response = await fetch('/api/me/groups', {
-          method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(next),
-        });
-        if (!response.ok) throw new Error('Could not save account groups');
-      } else if (token) {
-        if (!next.length) {
-          await this.disablePush(token);
-        } else {
-          const subscription = await firstValueFrom(this.swPush.subscription);
-          if (!subscription) throw new Error('Push subscription missing');
-          await this.savePush(token, subscription, next);
-        }
-      }
-      this.groups.set(next);
-      if (!this.signedIn) localStorage.setItem(groupsKey, JSON.stringify(next));
+      await this.saveDevice(next, this.name());
     } catch {
-      this.groupError.set('Не вдалося зберегти групи. Спробуйте ще раз.');
+      this.groupError.set('?? ??????? ???????? ?????. ????????? ?? ???.');
     } finally {
       this.changingPush.set(false);
     }
   }
 
   protected async togglePush() {
+    if (this.changingPush()) return;
+    const enabled = this.pushEnabled();
     const key = this.publicKey();
-    if (!key || !this.pushAvailable || this.changingPush() || !this.groups().length) return;
+    if (!enabled && (!key || !this.pushAvailable || !this.groups().length)) return;
     this.changingPush.set(true);
     this.pushMessage.set('');
-    let newSubscription: PushSubscription | undefined;
+    let created: PushSubscription | undefined;
     try {
-      const token = this.device();
-      if (token) {
-        await this.disablePush(token);
-      } else {
-        // Call the permission prompt directly from the button activity for iOS.
+      if (enabled) {
+        const response = await this.deviceRequest('/api/push/subscription', 'DELETE');
+        if (!response.ok) throw new Error('Push unsubscribe failed');
+        this.pushEnabled.set(false);
+        if (this.pushAvailable) await this.swPush.unsubscribe().catch(() => {});
+      } else if (key) {
+        // Request permission directly from the tap for iOS.
         if (await Notification.requestPermission() !== 'granted') {
-          this.pushMessage.set('Дозвольте сповіщення в налаштуваннях пристрою.');
+          this.pushMessage.set('????????? ?????????? ? ????????????? ????????.');
           return;
         }
-        newSubscription = await this.swPush.requestSubscription({ serverPublicKey: key });
-        const newToken = newDeviceToken();
-        await this.savePush(newToken, newSubscription, this.groups());
-        localStorage.setItem(pushKey, newToken);
-        this.device.set(newToken);
-        this.serverWatching.set(true);
+        let subscription = await firstValueFrom(this.swPush.subscription);
+        if (!subscription) subscription = created = await this.swPush.requestSubscription({ serverPublicKey: key });
+        const response = await this.deviceRequest('/api/push/subscription', 'PUT', subscription.toJSON());
+        if (!response.ok) throw new Error('Push registration failed');
+        this.pushEnabled.set(true);
       }
     } catch {
-      await newSubscription?.unsubscribe().catch(() => {});
-      this.pushMessage.set('Не вдалося змінити сповіщення. Спробуйте ще раз.');
+      await created?.unsubscribe().catch(() => {});
+      this.pushMessage.set('?? ??????? ??????? ??????????. ????????? ?? ???.');
     } finally {
       this.changingPush.set(false);
     }
-  }
-
-  private async restorePush(key: string) {
-    const token = this.device();
-    if (!token || this.changingPush()) return;
-    this.changingPush.set(true);
-    try {
-      const response = await fetch('/api/push/subscription', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!response.ok && response.status !== 404) throw new Error('Push settings unavailable');
-      let effectiveGroups = this.groups();
-      if (response.ok) {
-        const preferences = await response.json() as { groups: string[]; watching: boolean };
-        effectiveGroups = this.signedIn && this.groups().length ? this.groups() : preferences.groups;
-        if (!this.signedIn) {
-          this.groups.set(preferences.groups);
-          localStorage.setItem(groupsKey, JSON.stringify(preferences.groups));
-        }
-        this.serverWatching.set(preferences.watching);
-      }
-      const current = await firstValueFrom(this.swPush.subscription);
-      if (effectiveGroups.length && (!current || response.status === 404 || this.signedIn)) {
-        const subscription = current ?? await this.swPush.requestSubscription({ serverPublicKey: key });
-        await this.savePush(token, subscription, effectiveGroups);
-        if (this.signedIn) await this.loadAccount();
-      }
-    } catch {
-      this.pushMessage.set('Не вдалося перевірити підписку на сповіщення.');
-    } finally {
-      this.changingPush.set(false);
-    }
-  }
-
-  private async savePush(token: string, subscription: PushSubscription, groups: string[]) {
-    const response = await fetch('/api/push/subscription', {
-      method: 'PUT',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ subscription: subscription.toJSON(), groups }),
-    });
-    if (!response.ok) throw new Error('Push registration failed');
-  }
-
-  private async disablePush(token: string) {
-    const response = await fetch('/api/push/subscription', {
-      method: 'DELETE', headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!response.ok && response.status !== 404) throw new Error('Push unsubscribe failed');
-    localStorage.removeItem(pushKey);
-    this.device.set(null);
-    await this.swPush.unsubscribe().catch(() => {});
   }
 }

@@ -95,11 +95,12 @@
       <h1 class="page-title" id="notifications-title">Сповіщення</h1>
       <section class="surface settings">
         <h2>Зміни графіка</h2>
-        @if (pushEnabled()) {
-          @if (serverWatching()) {
+        @if (pushEnabled() && publicKey() && pushAvailable) {
+          @if (groups().length) {
             <p>Увімкнено для груп {{ groups().join(', ') }}.</p>
           } @else {
-            <p>Сповіщення призупинено адміністратором.</p>
+            <p>Оберіть групи, щоб отримувати сповіщення.</p>
+            <button class="primary" type="button" (click)="openView('groups', content)">Обрати групи</button>
           }
         } @else if (!pushAvailable && isAppleMobile) {
           <p>На iPhone додайте PowerOn на домашній екран і відкрийте його звідти.</p>
@@ -113,12 +114,24 @@
         } @else {
           <p>Отримуйте сповіщення, коли графік для ваших груп зміниться.</p>
         }
-        @if (publicKey() && pushAvailable && (groups().length || device())) {
-          <button class="primary" type="button" [disabled]="changingPush() || !groups().length" (click)="togglePush()">
-            {{ device() ? 'Вимкнути сповіщення' : 'Увімкнути сповіщення' }}
+        @if (pushEnabled() || (publicKey() && pushAvailable && groups().length)) {
+          <button class="primary" type="button" [disabled]="changingPush()" (click)="togglePush()">
+            {{ pushEnabled() ? 'Вимкнути сповіщення' : 'Увімкнути сповіщення' }}
           </button>
         }
         @if (pushMessage()) { <p role="status">{{ pushMessage() }}</p> }
+      </section>
+    }
+    @case ('profile') {
+      <h1 class="page-title" id="profile-title">Профіль</h1>
+      <section class="surface settings">
+        <form (submit)="$event.preventDefault(); saveName(displayName.value)">
+          <label class="profile-name">Ім’я (необов’язково)
+            <input #displayName [value]="name() ?? ''" maxlength="60" autocomplete="nickname">
+          </label>
+          <button class="primary" type="submit" [disabled]="changingPush()">Зберегти</button>
+        </form>
+        @if (profileMessage()) { <p role="status">{{ profileMessage() }}</p> }
       </section>
     }
   }
@@ -135,6 +148,8 @@
     <button type="button" [attr.aria-current]="view() === 'notifications' ? 'page' : null" (click)="openView('notifications', content)">
       <span class="icon bell-icon" aria-hidden="true"></span>Сповіщення
     </button>
-    <a href="/account.html"><span class="icon user-icon" aria-hidden="true"></span>Акаунт</a>
+    <button type="button" [attr.aria-current]="view() === 'profile' ? 'page' : null" (click)="openView('profile', content)">
+      <span class="icon user-icon" aria-hidden="true"></span>Профіль
+    </button>
   </div>
 </nav>

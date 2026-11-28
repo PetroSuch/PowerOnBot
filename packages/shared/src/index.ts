@@ -22,6 +22,12 @@ export type ScheduleResponse = {
   refreshFailed: boolean;
 };
 
+export type MobileDevice = {
+  name: string | null;
+  groups: string[];
+  notificationsEnabled: boolean;
+};
+
 export type ManagedSubscription = {
   id: string;
   groups: string[];

@@ -5,6 +5,7 @@ import path from 'node:path';
 
 import {
   createScheduleFeed,
+  createRemoteScheduleFeed,
   dateFromHeading,
   kyivDate,
   kyivTimeFormatter,
@@ -12,7 +13,7 @@ import {
   parseScheduleText,
 } from './schedule';
 import { startPwaServer } from './pwa';
-import { openTelegramState } from './telegram-state';
+import { openScheduleStore, openTelegramState } from './telegram-state';
 import { openConfiguredAccounts, type Accounts } from './accounts';
 
 type IsoDateString = string;
@@ -213,6 +214,7 @@ async function writeStateToDisk(state: BotState): Promise<void> {
 }
 
 let telegramStateStore: Awaited<ReturnType<typeof openTelegramState<BotState>>> | undefined;
+let scheduleStore: Awaited<ReturnType<typeof openScheduleStore>> | undefined;
 
 async function saveState(state: BotState): Promise<void> {
   if (telegramStateStore) {
@@ -245,7 +247,11 @@ async function ensureUser(chatId: string): Promise<UserState> {
   return state.users[chatId];
 }
 
-const scheduleFeed = createScheduleFeed();
+const combinedMode = process.argv.includes('--combined');
+const localScheduleFeed = createScheduleFeed();
+const scheduleFeed = !combinedMode && process.env.TELEGRAM_SCHEDULE_URL
+  ? createRemoteScheduleFeed(process.env.TELEGRAM_SCHEDULE_URL)
+  : localScheduleFeed;
 let lastAppliedSnapshot: ScheduleSnapshot | undefined;
 let pwaServer: Awaited<ReturnType<typeof startPwaServer>> | undefined;
 let accounts: Accounts | undefined;
@@ -366,7 +372,7 @@ async function applySchedule(result: ReturnType<typeof scheduleFeed.read>) {
 
   await runStateOp(async () => {
     if (snapshot === lastAppliedSnapshot) return;
-    await telegramStateStore?.saveSchedule(snapshot, scheduleFeed.nextFetchAt());
+    await scheduleStore?.saveSchedule(snapshot, scheduleFeed.nextFetchAt());
     let deliveryFailed = false;
     let processed = false;
     const linkedGroups = new Map((await accounts?.linkedChats() ?? []).map((chat) => [chat.chat_id, chat.groups]));
@@ -691,8 +697,17 @@ bot.on('text', async (ctx) => {
 
 async function main() {
   const importOnly = process.argv.includes('--import-telegram-state');
-  const databaseUrl = process.env.DATABASE_URL;
-  if (databaseUrl) {
+  const adminFlag = process.argv.indexOf('--grant-admin');
+  const useSharedServices = combinedMode || importOnly || adminFlag !== -1;
+  const databaseUrl = useSharedServices ? process.env.DATABASE_URL : undefined;
+  const storage = process.env.TELEGRAM_STATE_STORE;
+  if (storage !== undefined && storage !== 'file' && storage !== 'postgres') {
+    throw new Error('TELEGRAM_STATE_STORE must be file or postgres');
+  }
+  if (!databaseUrl && (importOnly || (useSharedServices && storage === 'postgres'))) {
+    throw new Error('DATABASE_URL is required for PostgreSQL Telegram state');
+  }
+  if (databaseUrl && (importOnly || storage !== 'file')) {
     const botId = token?.match(/^(\d+):/)?.[1];
     if (!botId) throw new Error('BOT_TOKEN must include the Telegram bot ID to select its PostgreSQL state');
     telegramStateStore = await openTelegramState({
@@ -702,7 +717,6 @@ async function main() {
     const action = telegramStateStore.initialized ? 'Initialized' : 'Loaded';
     console.info(`[State] ${action} ${Object.keys(state.users).length} chat records in PostgreSQL`);
   } else {
-    if (importOnly) throw new Error('DATABASE_URL is required to import Telegram state');
     state = await readStateFromDisk();
     console.info(`[State] Loaded ${Object.keys(state.users).length} chat records from ${STATE_FILE_PATH}`);
   }
@@ -710,8 +724,7 @@ async function main() {
     await telegramStateStore?.close();
     return;
   }
-  accounts = await openConfiguredAccounts();
-  const adminFlag = process.argv.indexOf('--grant-admin');
+  if (useSharedServices) accounts = await openConfiguredAccounts();
   if (adminFlag !== -1) {
     const email = process.argv[adminFlag + 1];
     try {
@@ -725,10 +738,13 @@ async function main() {
     }
     return;
   }
-  const savedSchedule = await telegramStateStore?.readSchedule();
-  if (savedSchedule) scheduleFeed.restore(savedSchedule.snapshot, savedSchedule.nextFetchAt);
+  scheduleStore = telegramStateStore ?? (databaseUrl
+    ? await openScheduleStore({ databaseUrl, directUrl: process.env.DATABASE_URL_UNPOOLED })
+    : undefined);
+  const savedSchedule = await scheduleStore?.readSchedule();
+  if (savedSchedule) localScheduleFeed.restore(savedSchedule.snapshot, savedSchedule.nextFetchAt);
 
-  if (process.env.PWA_PORT) {
+  if (combinedMode && process.env.PWA_PORT) {
     const scheduleResponse = (result: ReturnType<typeof scheduleFeed.read>): ScheduleResponse => ({
       snapshot: result.snapshot,
       refreshFailed: Boolean(result.error),
@@ -745,7 +761,7 @@ async function main() {
       webDirectory: path.join(REPO_ROOT, 'apps', 'web', 'dist', 'browser'),
       adminDirectory: path.join(REPO_ROOT, 'apps', 'admin', 'dist', 'browser'),
       accounts,
-      telegram: telegramStateStore ? {
+      telegram: {
         list: listTelegramSubscriptions, update: updateTelegramSubscription,
         username: () => bot.botInfo?.username,
         legacyGroups: (id) => state.users[id]?.groups ?? [],
@@ -754,7 +770,7 @@ async function main() {
           state.users[id] = { ...user, groups: undefined };
           await saveState(state);
         }),
-      } : undefined,
+      },
     });
   }
 
@@ -841,7 +857,7 @@ main().catch((err) => {
 process.once('SIGINT', () => {
   pwaServer?.close();
   void accounts?.close().catch(() => console.error('[Accounts] PostgreSQL shutdown failed'));
-  void telegramStateStore?.close().catch(() => console.error('[State] PostgreSQL shutdown failed'));
+  void (scheduleStore ?? telegramStateStore)?.close().catch(() => console.error('[State] PostgreSQL shutdown failed'));
   try {
     bot.stop('SIGINT');
   } catch {
@@ -851,7 +867,7 @@ process.once('SIGINT', () => {
 process.once('SIGTERM', () => {
   pwaServer?.close();
   void accounts?.close().catch(() => console.error('[Accounts] PostgreSQL shutdown failed'));
-  void telegramStateStore?.close().catch(() => console.error('[State] PostgreSQL shutdown failed'));
+  void (scheduleStore ?? telegramStateStore)?.close().catch(() => console.error('[State] PostgreSQL shutdown failed'));
   try {
     bot.stop('SIGTERM');
   } catch {

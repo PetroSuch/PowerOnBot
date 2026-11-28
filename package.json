@@ -5,6 +5,7 @@
   "workspaces": [
     "packages/shared",
     "apps/telegram-server",
+    "apps/mobile-server",
     "apps/mobile",
     "apps/web",
     "apps/admin"
@@ -15,8 +16,9 @@
   "scripts": {
     "build:shared": "npm run build --workspace @poweron/shared",
     "build": "npm run build --workspaces",
-    "test": "npm run build:shared && npm run test --workspace @poweron/telegram-server",
+    "test": "npm run build:shared && npm run test --workspace @poweron/telegram-server --workspace @poweron/mobile-server",
     "start": "npm run build:shared && npm run start --workspace @poweron/telegram-server",
+    "start:mobile-api": "npm run start --workspace @poweron/mobile-server",
     "dev": "npm run dev:telegram",
     "dev:telegram": "npm run build:shared && npm run dev --workspace @poweron/telegram-server",
     "dev:mobile": "npm run build:shared && npm run start --workspace @poweron/mobile",

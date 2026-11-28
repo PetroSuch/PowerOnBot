@@ -1,5 +1,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { once } = require('node:events');
+const { createServer } = require('node:http');
 const test = require('node:test');
 const vm = require('node:vm');
 const schedule = require('../dist/schedule.js');
@@ -18,7 +20,7 @@ function html(first, second = 'Є електроенергія.') {
   return `<h2>Графік погодинних відключень</h2><p>Група 1,1. ${first}</p><p>Група 1.2. ${second}</p>`;
 }
 
-function createBot(users, initialFile = JSON.stringify({ users }), openDatabase, accounts) {
+function createBot(users, initialFile = JSON.stringify({ users }), openDatabase, accounts, options = {}) {
   let now = startTime;
   let disk = initialFile;
   let pendingWrite;
@@ -60,7 +62,9 @@ function createBot(users, initialFile = JSON.stringify({ users }), openDatabase,
       if (name === 'telegraf') return { Telegraf: MockTelegraf };
       if (name === './pwa') return require('../dist/pwa.js');
       if (name === './accounts') return { openConfiguredAccounts: async () => accounts };
-      if (name === './telegram-state') return { openTelegramState: openDatabase };
+      if (name === './telegram-state') {
+        return { openTelegramState: openDatabase, openScheduleStore: options.openScheduleStore };
+      }
       if (name === 'node:fs/promises') return mockFs;
       if (name === './schedule') return {
         ...schedule,
@@ -72,8 +76,11 @@ function createBot(users, initialFile = JSON.stringify({ users }), openDatabase,
       return require(name);
     },
     process: {
-      env: openDatabase ? { BOT_TOKEN: '123:test', DATABASE_URL: 'postgres://test' } : { BOT_TOKEN: 'test' },
-      argv: [], cwd: () => '.', pid: 1, loadEnvFile() {}, once() {}, exit: (code) => exits.push(code),
+      env: {
+        ...(openDatabase ? { BOT_TOKEN: '123:test', DATABASE_URL: 'postgres://test' } : { BOT_TOKEN: 'test' }),
+        ...options.env,
+      },
+      argv: options.argv ?? ['--combined'], cwd: () => '.', pid: 1, loadEnvFile() {}, once() {}, exit: (code) => exits.push(code),
     },
     setTimeout(callback) { timers.push(callback); },
   });
@@ -340,6 +347,65 @@ test('Telegram startup fails without falling back to the local file if PostgreSQ
   assert.deepEqual(bot.exits, [1]);
   assert.match(bot.startupErrors[0], /database unavailable/);
   assert.equal(bot.calls, 0);
+});
+
+test('file mode saves Telegram state locally and keeps the PostgreSQL schedule cache', async () => {
+  const savedSchedule = {
+    snapshot: schedule.parseScheduleFeed(menu(html('Графік зі сховища.')), startTime),
+    nextFetchAt: startTime + tenMinutes,
+  };
+  const writtenSnapshots = [];
+  const bot = createBot({ 1: watching(), 2: watching() }, undefined, async () => {
+    assert.fail('File mode must not open PostgreSQL Telegram state');
+  }, undefined, {
+    env: { TELEGRAM_STATE_STORE: 'file' },
+    async openScheduleStore({ databaseUrl }) {
+      assert.equal(databaseUrl, 'postgres://test');
+      return {
+        async readSchedule() { return savedSchedule; },
+        async saveSchedule(snapshot) { writtenSnapshots.push(snapshot.fetchedAt); },
+      };
+    },
+  });
+  assert.match(await bot.command('check', 1), /Графік зі сховища/);
+  assert.equal(bot.calls, 0);
+  await bot.command('add_group', 1, 1, '/add_group 1.2');
+  bot.advance(tenMinutes);
+  await bot.runScheduledPass();
+  assert.equal(bot.calls, 1);
+  assert.deepEqual(writtenSnapshots, [startTime, startTime + tenMinutes]);
+  assert.deepEqual(bot.saved.users[1].groups, ['1.1', '1.2']);
+  assert.ok(bot.saved.users[2].lastLoeWatchedText);
+});
+
+test('standalone Telegram uses the JSON file even when PostgreSQL is configured', async () => {
+  const bot = createBot({ 1: watching() }, undefined, async () => {
+    assert.fail('Standalone Telegram must not connect to PostgreSQL');
+  }, undefined, { argv: [], env: { PWA_PORT: '8080' } });
+  await bot.runScheduledPass();
+  assert.match(bot.logs[0], /chat records from .*label-state\.json/);
+  assert.ok(bot.saved.users[1].lastLoeWatchedText);
+  assert.deepEqual(bot.exits, []);
+});
+
+test('Telegram can share the mobile API refresh and its cooldown', async (t) => {
+  const snapshot = { fetchedAt: startTime };
+  let calls = 0;
+  const mobile = createServer((req, res) => {
+    assert.equal(req.method, 'POST');
+    assert.equal(req.url, '/api/schedule/refresh');
+    calls++;
+    res.end(JSON.stringify({ snapshot, refreshFailed: false, nextFetchAt: Date.now() + tenMinutes }));
+  });
+  mobile.listen(0, '127.0.0.1');
+  await once(mobile, 'listening');
+  t.after(() => mobile.close());
+  const feed = schedule.createRemoteScheduleFeed('http://127.0.0.1:' + mobile.address().port);
+  const [first, second] = await Promise.all([feed.refresh(), feed.refresh()]);
+  assert.strictEqual(first, second);
+  assert.deepEqual(first.snapshot, snapshot);
+  assert.strictEqual(await feed.refresh(), first);
+  assert.equal(calls, 1);
 });
 
 test('a linked Telegram chat uses and updates the shared account groups', async () => {

@@ -1,12 +1,11 @@
 import { createHash } from 'node:crypto';
 import { Client, Pool } from 'pg';
 import webPush, { type PushSubscription } from 'web-push';
-import { POSSIBLE_GROUPS, type ManagedSubscription, type ScheduleDay, type ScheduleSnapshot } from '@poweron/shared';
-import { kyivDate } from './schedule';
+import { type ManagedSubscription, type ScheduleSnapshot } from '@poweron/shared';
+import { comparePushSchedule, type Baseline } from '@poweron/shared/push';
+export { comparePushSchedule, parsePushRegistration } from '@poweron/shared/push';
 import type { Accounts } from './accounts';
 
-type DayBaseline = { date: string; groups: Record<string, string | null> };
-type Baseline = { today?: DayBaseline; tomorrow?: DayBaseline };
 type Device = {
   device_key: Buffer;
   subscription: PushSubscription;
@@ -14,43 +13,6 @@ type Device = {
   baseline: Baseline;
   revision: number;
 };
-
-function selectedDay(day: ScheduleDay | undefined, date: string, groups: string[]): DayBaseline | undefined {
-  if (day?.date !== date || !groups.some((group) => typeof day.groups[group] === 'string')) return undefined;
-  return { date, groups: Object.fromEntries(groups.map((group) => [group, day.groups[group] ?? null])) };
-}
-
-export function comparePushSchedule(snapshot: ScheduleSnapshot, groups: string[], previous: Baseline = {}) {
-  const today = selectedDay(snapshot.today, kyivDate(snapshot.fetchedAt), groups);
-  const tomorrow = selectedDay(snapshot.tomorrow, kyivDate(snapshot.fetchedAt, 1), groups);
-  const changed = (current: DayBaseline, old: DayBaseline) =>
-    current.date !== old.date || groups.some((group) => current.groups[group] !== old.groups[group]);
-  const alerts: string[] = [];
-  if (today && previous.today && changed(today, previous.today)) alerts.push('Оновився графік на сьогодні');
-  if (tomorrow && (!previous.tomorrow || changed(tomorrow, previous.tomorrow))) alerts.push('Оновився графік на завтра');
-  return {
-    baseline: { today: today ?? previous.today, tomorrow: tomorrow ?? previous.tomorrow },
-    alerts,
-  };
-}
-
-export function parsePushRegistration(value: unknown): { subscription: PushSubscription; groups: string[] } | undefined {
-  if (!value || typeof value !== 'object' || !('subscription' in value) || !('groups' in value)) return;
-  const { subscription, groups } = value;
-  if (!Array.isArray(groups) || !groups.length || groups.length > POSSIBLE_GROUPS.length
-    || !groups.every((group) => typeof group === 'string' && POSSIBLE_GROUPS.includes(group))) return;
-  if (!subscription || typeof subscription !== 'object' || !('endpoint' in subscription) || !('keys' in subscription)) return;
-  const { endpoint, keys } = subscription;
-  if (typeof endpoint !== 'string' || endpoint.length > 2048 || !keys || typeof keys !== 'object'
-    || !('p256dh' in keys) || !('auth' in keys) || typeof keys.p256dh !== 'string' || typeof keys.auth !== 'string'
-    || !/^[A-Za-z0-9_-]{87}$/.test(keys.p256dh) || !/^[A-Za-z0-9_-]{22}$/.test(keys.auth)) return;
-
-  const url = URL.canParse(endpoint) ? new URL(endpoint) : undefined;
-  if (!url || url.protocol !== 'https:' || url.username || url.password || url.port
-    || !(url.hostname === 'fcm.googleapis.com' || url.hostname === 'updates.push.services.mozilla.com'
-      || url.hostname.endsWith('.push.apple.com'))) return;
-  return { subscription: { endpoint: url.href, keys: { p256dh: keys.p256dh, auth: keys.auth } }, groups: [...new Set(groups)] };
-}
 
 export async function createPwaPushService(accounts?: Accounts) {
   const { DATABASE_URL, DATABASE_URL_UNPOOLED, VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY } = process.env;
